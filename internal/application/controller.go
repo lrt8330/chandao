@@ -149,13 +149,14 @@ func (c *Controller) pollInterval() time.Duration {
 // Refresh fetches assigned items and persists a new baseline before reporting changes.
 func (c *Controller) Refresh(ctx context.Context) (RefreshResult, error) {
 	c.refreshMu.Lock()
-	defer c.refreshMu.Unlock()
 	if err := ctx.Err(); err != nil {
+		c.refreshMu.Unlock()
 		return RefreshResult{}, err
 	}
 
 	if !c.loggedIn {
 		if err := c.gateway.Login(ctx); err != nil {
+			c.refreshMu.Unlock()
 			return RefreshResult{}, fmt.Errorf("login: %w", err)
 		}
 		c.loggedIn = true
@@ -165,6 +166,7 @@ func (c *Controller) Refresh(ctx context.Context) (RefreshResult, error) {
 	if errors.Is(err, ErrSessionExpired) {
 		c.loggedIn = false
 		if err := c.gateway.Login(ctx); err != nil {
+			c.refreshMu.Unlock()
 			return RefreshResult{}, fmt.Errorf("re-login: %w", err)
 		}
 		c.loggedIn = true
@@ -174,6 +176,7 @@ func (c *Controller) Refresh(ctx context.Context) (RefreshResult, error) {
 		}
 	}
 	if err != nil {
+		c.refreshMu.Unlock()
 		return RefreshResult{}, fmt.Errorf("fetch assigned items: %w", err)
 	}
 	current := make(map[string]domain.Item, len(items))
@@ -186,12 +189,15 @@ func (c *Controller) Refresh(ctx context.Context) (RefreshResult, error) {
 	snapshot.LastSuccess = time.Now()
 	snapshot.Initialized = true
 	if err := snapshot.Validate(); err != nil {
+		c.refreshMu.Unlock()
 		return RefreshResult{}, err
 	}
 	if err := c.store.Save(ctx, snapshot); err != nil {
+		c.refreshMu.Unlock()
 		return RefreshResult{}, fmt.Errorf("save snapshot: %w", err)
 	}
 	c.snapshot = snapshot
+	c.refreshMu.Unlock()
 	if snapshot.NotificationsEnabled && len(changes) > 0 {
 		c.notifier.Notify(ctx, changes)
 	}

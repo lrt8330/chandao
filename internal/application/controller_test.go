@@ -198,6 +198,51 @@ func TestRefreshNotifiesForNewAndStatusChangesAfterSave(t *testing.T) {
 	}
 }
 
+func TestRefreshNotificationCanUpdateSettings(t *testing.T) {
+	oldItem := testItem("1", domain.ItemTask, "doing")
+	newItem := testItem("2", domain.ItemBug, "active")
+	snapshot := application.DefaultSnapshot()
+	snapshot.Initialized = true
+	snapshot.Items = itemMap(oldItem)
+	gateway := &fakeGateway{items: []domain.Item{newItem}}
+	store := &fakeStore{snapshot: snapshot}
+	notifier := &fakeNotifier{}
+	controller := newTestController(t, gateway, store, notifier)
+	settingsDone := make(chan error, 1)
+	notifier.hook = func() {
+		settingsDone <- controller.UpdateSettings(context.Background(), 30, true)
+	}
+	refreshDone := make(chan error, 1)
+	go func() {
+		_, err := controller.Refresh(context.Background())
+		refreshDone <- err
+	}()
+
+	select {
+	case err := <-settingsDone:
+		if err != nil {
+			t.Fatalf("UpdateSettings() from Notify() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Refresh() deadlocked: Notify() could not call UpdateSettings() while refreshMu was held")
+	}
+	select {
+	case err := <-refreshDone:
+		if err != nil {
+			t.Fatalf("Refresh() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Refresh() did not finish after Notify() updated settings")
+	}
+	saved, saveCalls := store.state()
+	if saveCalls != 2 {
+		t.Errorf("Save() calls = %d, want 2", saveCalls)
+	}
+	if saved.PollSeconds != 30 || !saved.NotificationsEnabled || saved.Items[newItem.Key()] != newItem {
+		t.Errorf("final snapshot = %#v, want updated settings and new baseline", saved)
+	}
+}
+
 func TestStopCancelsInFlightRefreshAndWaitsForErrorCallback(t *testing.T) {
 	fetchStarted := make(chan struct{}, 1)
 	continueFetch := make(chan struct{})

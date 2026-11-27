@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"chandao/zentaotray/internal/domain"
+	"github.com/nsgo-dev/nsgo/core"
 )
 
 // WorkbenchData is the presentation snapshot supplied by the application layer.
@@ -22,9 +23,18 @@ type WorkbenchData struct {
 
 // WorkbenchProps connects the workbench to application and platform actions.
 type WorkbenchProps struct {
-	Data       WorkbenchData
-	OnRefresh  func()
-	OnOpenURL  func(string)
-	OnLogin    func(account, password string)
-	OnSettings func(pollSeconds int, notificationsEnabled bool)
+	Data        WorkbenchData
+	DataFunc    func() WorkbenchData
+	SelectedKey *core.Signal[string]
+	OnRefresh   func()
+	OnOpenURL   func(string)
+	OnLogin     func(account, password string)
+	OnSettings  func(pollSeconds int, notificationsEnabled bool)
+}
+
+func (props WorkbenchProps) data() WorkbenchData {
+	if props.DataFunc != nil {
+		return props.DataFunc()
+	}
+	return props.Data
 }

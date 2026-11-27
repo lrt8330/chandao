@@ -307,6 +307,185 @@ func TestWorkbenchFiltersByType(t *testing.T) {
 	app.Find("label:补充接口文档")
 }
 
+func TestWorkbenchDataFuncUpdatesWithoutResettingFilters(t *testing.T) {
+	items := testItems()
+	initial := WorkbenchData{
+		Account:     "initial.account",
+		Connected:   true,
+		LastSuccess: time.Date(2026, 11, 27, 18, 30, 0, 0, time.Local),
+		Items:       items,
+	}
+	var data *core.Signal[WorkbenchData]
+	app := nsgotest.Start(t, func(cx *core.Scope) core.Node {
+		data = core.NewSignalFunc(cx, initial, nil)
+		return core.View{Style: core.Style{FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0), MinHeight: core.Pt(0)}, Children: []core.Node{
+			Workbench(cx, WorkbenchProps{
+				Data:     WorkbenchData{Account: "stale.account"},
+				DataFunc: data.Get,
+			}),
+		}}
+	}, workbenchTestOptions()...)
+
+	app.Find("text:账号：initial.account")
+	app.Find("label:修复登录页")
+	app.Press("id:filter-bug")
+	app.Find("label:登录后白屏")
+
+	refreshed := WorkbenchData{
+		Account:      "refreshed.account",
+		Connected:    false,
+		Loading:      true,
+		LastSuccess:  time.Date(2026, 11, 27, 19, 30, 0, 0, time.Local),
+		ErrorMessage: "刷新完成，请检查连接",
+		Items: []domain.Item{
+			{ID: "4", Type: domain.ItemTask, Title: "刷新后的任务", Status: "doing"},
+			{ID: "5", Type: domain.ItemBug, Title: "刷新后的 Bug", Status: "active"},
+			{ID: "6", Type: domain.ItemBug, Title: "新增的 Bug", Status: "new"},
+		},
+		Changes: []domain.Change{
+			{Kind: domain.ChangeNew},
+			{Kind: domain.ChangeNew},
+			{Kind: domain.ChangeStatus},
+		},
+	}
+	app.Post(func() { data.Set(refreshed) })
+	app.Settle()
+
+	if !app.Find("id:filter-bug").Props.Selected {
+		t.Fatal("Bug filter was reset after the data signal changed")
+	}
+	app.Find("label:刷新后的 Bug")
+	app.Find("label:新增的 Bug")
+	app.Find("text:2 条记录")
+	for _, label := range []string{"修复登录页", "登录后白屏", "补充接口文档", "刷新后的任务"} {
+		if app.Exists("label:" + label) {
+			t.Errorf("filtered row %q remains after refresh", label)
+		}
+	}
+	for id, want := range map[string]string{
+		"kpi-tasks-value":  "1",
+		"kpi-bugs-value":   "2",
+		"kpi-new-value":    "2",
+		"kpi-status-value": "1",
+	} {
+		if got := app.Find("id:" + id).Text; got != want {
+			t.Errorf("%s after refresh = %q, want %q", id, got, want)
+		}
+	}
+	app.Find("text:账号：refreshed.account")
+	app.Find("text:未连接")
+	app.Find("text:上次刷新：2026-11-27 19:30")
+	app.Find("id:loading-state")
+	app.Find("text:刷新完成，请检查连接")
+	if refresh := app.Find("id:refresh"); !refresh.Props.Disabled || !refresh.Props.Busy {
+		t.Fatalf("refresh disabled/busy after refresh = %v/%v, want true/true", refresh.Props.Disabled, refresh.Props.Busy)
+	}
+}
+
+func TestWorkbenchUsesExternalSelectedKey(t *testing.T) {
+	items := testItems()
+	var selectedKey *core.Signal[string]
+	app := nsgotest.Start(t, func(cx *core.Scope) core.Node {
+		selectedKey = core.NewSignal(cx, "")
+		return core.View{Style: core.Style{FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0), MinHeight: core.Pt(0)}, Children: []core.Node{
+			Workbench(cx, WorkbenchProps{
+				Data:        WorkbenchData{Connected: true, Items: items},
+				SelectedKey: selectedKey,
+			}),
+		}}
+	}, workbenchTestOptions(
+		nsgotest.Size(390, 844),
+		nsgotest.Environment(core.Environment{OS: core.OSWindows, Idiom: core.IdiomPhone, Locale: "zh-CN"}),
+	)...)
+
+	if app.Exists("id:item-detail") {
+		t.Fatal("detail is visible before the external selection is set")
+	}
+	app.Post(func() { selectedKey.Set(items[1].Key()) })
+	app.Settle()
+	detail := app.Find("id:item-detail")
+	if detail.Props.Role != core.RoleDialog {
+		t.Fatalf("external detail role = %v, want dialog", detail.Props.Role)
+	}
+	for id, want := range map[string]string{
+		"detail-title": items[1].Title,
+		"detail-key":   items[1].Key(),
+	} {
+		if got := app.Find("id:" + id).Text; got != want {
+			t.Errorf("%s = %q, want %q", id, got, want)
+		}
+	}
+
+	app.Press("id:close-item-detail")
+	app.WaitForGone("id:item-detail", time.Second)
+	if got := selectedKey.Get(); got != "" {
+		t.Fatalf("external selection after closing detail = %q, want empty", got)
+	}
+
+	app.Press("label:修复登录页")
+	if got := selectedKey.Get(); got != items[0].Key() {
+		t.Fatalf("external selection after row press = %q, want %q", got, items[0].Key())
+	}
+}
+
+func TestWorkbenchDataFuncUpdatesLoginAndSettings(t *testing.T) {
+	initial := WorkbenchData{
+		NeedsLogin:           true,
+		PollSeconds:          60,
+		NotificationsEnabled: true,
+	}
+	var data *core.Signal[WorkbenchData]
+	app := nsgotest.Start(t, func(cx *core.Scope) core.Node {
+		data = core.NewSignalFunc(cx, initial, nil)
+		return core.View{Style: core.Style{FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0), MinHeight: core.Pt(0)}, Children: []core.Node{
+			Workbench(cx, WorkbenchProps{DataFunc: data.Get}),
+		}}
+	}, workbenchTestOptions()...)
+
+	app.Type("id:login-account", "account")
+	app.Type("id:login-password", "test-only-secret")
+	if app.Find("id:login-submit").Props.Disabled {
+		t.Fatal("login submit is disabled before the reactive loading update")
+	}
+	loading := initial
+	loading.Loading = true
+	app.Post(func() { data.Set(loading) })
+	app.Settle()
+	if !app.Find("id:login-submit").Props.Disabled {
+		t.Fatal("login submit did not react to the loading update")
+	}
+
+	connected := WorkbenchData{
+		Connected:   true,
+		PollSeconds: 90,
+		Items:       testItems(),
+	}
+	app.Post(func() { data.Set(connected) })
+	app.Settle()
+	app.Find("id:item-list")
+	if app.Exists("id:login-panel") {
+		t.Fatal("login panel remains after NeedsLogin becomes false")
+	}
+	app.Press("id:open-settings")
+	if got := app.Find("id:poll-seconds").Text; got != "90" {
+		t.Fatalf("reactive poll seconds = %q, want 90", got)
+	}
+	if app.Find("id:notifications-enabled").Props.Checked {
+		t.Fatal("reactive notifications setting is still enabled")
+	}
+
+	connected.PollSeconds = 120
+	connected.NotificationsEnabled = true
+	app.Post(func() { data.Set(connected) })
+	app.Settle()
+	if got := app.Find("id:poll-seconds").Text; got != "120" {
+		t.Fatalf("updated poll seconds = %q, want 120", got)
+	}
+	if !app.Find("id:notifications-enabled").Props.Checked {
+		t.Fatal("notifications setting did not react to the data update")
+	}
+}
+
 func TestWorkbenchRendersItemRows(t *testing.T) {
 	app := startWorkbench(t, WorkbenchProps{Data: WorkbenchData{Connected: true, Items: testItems()}})
 
@@ -593,12 +772,15 @@ func testItems() []domain.Item {
 
 func startWorkbench(t *testing.T, props WorkbenchProps, opts ...nsgotest.Option) *nsgotest.App {
 	t.Helper()
+	return nsgotest.Start(t, func(cx *core.Scope) core.Node {
+		return core.View{Style: core.Style{FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0), MinHeight: core.Pt(0)}, Children: []core.Node{Workbench(cx, props)}}
+	}, workbenchTestOptions(opts...)...)
+}
+
+func workbenchTestOptions(opts ...nsgotest.Option) []nsgotest.Option {
 	options := []nsgotest.Option{
 		nsgotest.Size(1200, 900),
 		nsgotest.Environment(core.Environment{OS: core.OSWindows, Idiom: core.IdiomDesktop, Locale: "zh-CN"}),
 	}
-	options = append(options, opts...)
-	return nsgotest.Start(t, func(cx *core.Scope) core.Node {
-		return core.View{Style: core.Style{FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0), MinHeight: core.Pt(0)}, Children: []core.Node{Workbench(cx, props)}}
-	}, options...)
+	return append(options, opts...)
 }

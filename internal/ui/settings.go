@@ -24,8 +24,8 @@ func settingsButton(open *core.Signal[bool]) core.Node {
 
 func settingsDialog(cx *core.Scope, props WorkbenchProps, open *core.Signal[bool]) core.Node {
 	colors := ui.ColorsOf(cx)
-	pollText := core.NewSignal(cx, strconv.Itoa(props.Data.PollSeconds))
-	notifications := core.NewSignal(cx, props.Data.NotificationsEnabled)
+	pollText := core.NewSignal(cx, strconv.Itoa(props.data().PollSeconds))
+	notifications := core.NewSignal(cx, props.data().NotificationsEnabled)
 	validationError := core.NewSignal(cx, "")
 	close := func() { open.Set(false) }
 	save := func() {
@@ -42,8 +42,9 @@ func settingsDialog(cx *core.Scope, props WorkbenchProps, open *core.Signal[bool
 
 	cx.Effect(func() {
 		if open.Get() {
-			pollText.Set(strconv.Itoa(props.Data.PollSeconds))
-			notifications.Set(props.Data.NotificationsEnabled)
+			data := props.data()
+			pollText.Set(strconv.Itoa(data.PollSeconds))
+			notifications.Set(data.NotificationsEnabled)
 			validationError.Set("")
 		}
 	})

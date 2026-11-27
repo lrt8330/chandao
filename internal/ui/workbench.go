@@ -20,7 +20,10 @@ func Workbench(cx *core.Scope, props WorkbenchProps) core.Node {
 	changesOnly := core.NewSignal(cx, false)
 	settingsOpen := core.NewSignal(cx, false)
 	selection := ui.NewSelection(cx, false)
-	selectedKey := core.NewSignal(cx, "")
+	selectedKey := props.SelectedKey
+	if selectedKey == nil {
+		selectedKey = core.NewSignal(cx, "")
+	}
 	onSelectionChange := func(selection *ui.Selection) {
 		keys := selection.Keys()
 		if len(keys) == 0 {
@@ -29,13 +32,14 @@ func Workbench(cx *core.Scope, props WorkbenchProps) core.Node {
 		}
 		selectedKey.Set(keys[0].(string))
 	}
-	changedKeys := make(map[string]struct{}, len(props.Data.Changes))
-	for _, change := range props.Data.Changes {
-		changedKeys[change.Item.Key()] = struct{}{}
-	}
 	filteredItems := core.NewMemoFunc(cx, func() []domain.Item {
+		data := props.data()
+		changedKeys := make(map[string]struct{}, len(data.Changes))
+		for _, change := range data.Changes {
+			changedKeys[change.Item.Key()] = struct{}{}
+		}
 		var visible []domain.Item
-		for _, item := range props.Data.Items {
+		for _, item := range data.Items {
 			_, changed := changedKeys[item.Key()]
 			if changesOnly.Get() && !changed {
 				continue
@@ -46,7 +50,7 @@ func Workbench(cx *core.Scope, props WorkbenchProps) core.Node {
 		}
 		return visible
 	}, slices.Equal)
-	kpis := workbenchKPIs(props.Data)
+	kpis := core.NewMemo(cx, func() kpiCounts { return workbenchKPIs(props.data()) })
 
 	return core.View{
 		TestID: "workbench",
@@ -59,8 +63,10 @@ func Workbench(cx *core.Scope, props WorkbenchProps) core.Node {
 			workbenchHeader(cx, props, settingsOpen),
 			settingsDialog(cx, props, settingsOpen),
 			core.Show{
-				When: func() bool { return strings.TrimSpace(props.Data.ErrorMessage) != "" },
-				Then: func(cx *core.Scope) core.Node { return errorBanner(cx, props.Data.ErrorMessage) },
+				When: func() bool { return strings.TrimSpace(props.data().ErrorMessage) != "" },
+				Then: func(cx *core.Scope) core.Node {
+					return errorBanner(cx, func() string { return props.data().ErrorMessage })
+				},
 			},
 			core.View{
 				Style: core.Style{Display: core.DisplayGrid, Gap: 12},
@@ -72,14 +78,14 @@ func Workbench(cx *core.Scope, props WorkbenchProps) core.Node {
 					return core.Style{GridTemplateColumns: core.GridTracks(columns)}
 				},
 				Children: []core.Node{
-					kpiCard(cx, "未完成任务", kpis.tasks, "kpi-tasks"),
-					kpiCard(cx, "未解决 Bug", kpis.bugs, "kpi-bugs"),
-					kpiCard(cx, "本轮新增", kpis.added, "kpi-new"),
-					kpiCard(cx, "本轮状态变化", kpis.statusChanges, "kpi-status"),
+					kpiCard(cx, "未完成任务", func() int { return kpis.Get().tasks }, "kpi-tasks"),
+					kpiCard(cx, "未解决 Bug", func() int { return kpis.Get().bugs }, "kpi-bugs"),
+					kpiCard(cx, "本轮新增", func() int { return kpis.Get().added }, "kpi-new"),
+					kpiCard(cx, "本轮状态变化", func() int { return kpis.Get().statusChanges }, "kpi-status"),
 				},
 			},
 			core.Show{
-				When: func() bool { return props.Data.NeedsLogin },
+				When: func() bool { return props.data().NeedsLogin },
 				Then: func(cx *core.Scope) core.Node { return loginPanel(cx, props) },
 				Else: func(cx *core.Scope) core.Node {
 					return core.Group{
@@ -120,7 +126,7 @@ func workbenchFilters(cx *core.Scope, filter *core.Signal[itemFilter], changesOn
 
 func workbenchBody(cx *core.Scope, props WorkbenchProps, items func() []domain.Item, selection *ui.Selection, onSelectionChange func(*ui.Selection), selectedKey *core.Signal[string]) core.Node {
 	selectedItem := func() domain.Item {
-		for _, item := range props.Data.Items {
+		for _, item := range props.data().Items {
 			if item.Key() == selectedKey.Get() {
 				return item
 			}
@@ -129,13 +135,13 @@ func workbenchBody(cx *core.Scope, props WorkbenchProps, items func() []domain.I
 	}
 	wide := core.NewMemo(cx, func() bool { return cx.Env().Window().Width >= 900 })
 	emptyMessage := func() string {
-		if len(props.Data.Items) == 0 {
+		if len(props.data().Items) == 0 {
 			return "暂无待办任务和 Bug"
 		}
 		return "没有符合当前筛选条件的记录"
 	}
 	return core.Dynamic(func(cx *core.Scope) core.Node {
-		list := workbenchList(cx, items, selection, onSelectionChange, emptyMessage, props.Data.Loading)
+		list := workbenchList(cx, items, selection, onSelectionChange, emptyMessage, func() bool { return props.data().Loading })
 		if !wide.Get() {
 			return core.View{
 				Style: core.Style{FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0), MinHeight: core.Pt(0)},
@@ -171,7 +177,7 @@ func detailPlaceholder(cx *core.Scope) core.Node {
 	}
 }
 
-func workbenchList(cx *core.Scope, items func() []domain.Item, selection *ui.Selection, onSelectionChange func(*ui.Selection), emptyMessage func() string, loading bool) core.Node {
+func workbenchList(cx *core.Scope, items func() []domain.Item, selection *ui.Selection, onSelectionChange func(*ui.Selection), emptyMessage func() string, loading func() bool) core.Node {
 	colors := ui.ColorsOf(cx)
 	return core.View{
 		TestID: "list-panel",
@@ -184,7 +190,7 @@ func workbenchList(cx *core.Scope, items func() []domain.Item, selection *ui.Sel
 				core.Text{Content: "我的待办", Style: ui.TypeTitle},
 				core.Text{ContentFunc: func() string { return fmt.Sprintf("%d 条记录", len(items())) }, Style: ui.TypeCaption, StyleFunc: ui.Colored(colors.Muted)},
 			}},
-			core.Show{When: func() bool { return loading }, Then: func(cx *core.Scope) core.Node { return loadingState(cx) }},
+			core.Show{When: loading, Then: func(cx *core.Scope) core.Node { return loadingState(cx) }},
 			ui.List{
 				TestID: "item-list", Label: "禅道任务和 Bug", Selection: selection, OnSelectionChange: onSelectionChange,
 				Count: func() int { return len(items()) }, Key: func(i int) any { return items()[i].Key() },
@@ -217,7 +223,7 @@ func workbenchList(cx *core.Scope, items func() []domain.Item, selection *ui.Sel
 	}
 }
 
-func errorBanner(cx *core.Scope, message string) core.Node {
+func errorBanner(cx *core.Scope, message func() string) core.Node {
 	colors := ui.ColorsOf(cx)
 	return core.View{
 		TestID: "error-banner", Role: core.RoleAlert,
@@ -225,7 +231,7 @@ func errorBanner(cx *core.Scope, message string) core.Node {
 		StyleFunc: func() core.Style {
 			return core.Style{Background: ui.Alpha(colors.Danger(), 0.08), BorderColor: ui.Alpha(colors.Danger(), 0.25)}
 		},
-		Children: []core.Node{core.Text{Content: message, Style: ui.TypeBody, StyleFunc: ui.Colored(colors.Danger)}},
+		Children: []core.Node{core.Text{ContentFunc: message, Style: ui.TypeBody, StyleFunc: ui.Colored(colors.Danger)}},
 	}
 }
 
@@ -279,25 +285,37 @@ func finishedStatus(status string) bool {
 
 func workbenchHeader(cx *core.Scope, props WorkbenchProps, settingsOpen *core.Signal[bool]) core.Node {
 	colors := ui.ColorsOf(cx)
-	account := strings.TrimSpace(props.Data.Account)
-	if account == "" {
-		account = "未登录"
+	account := func() string {
+		value := strings.TrimSpace(props.data().Account)
+		if value == "" {
+			return "未登录"
+		}
+		return value
 	}
-	connection := "未连接"
-	statusColor := colors.Warn
-	if props.Data.Connected {
-		connection = "已连接"
-		statusColor = colors.Up
+	connection := func() string {
+		if props.data().Connected {
+			return "已连接"
+		}
+		return "未连接"
 	}
-	lastSuccess := "上次刷新：尚未刷新"
-	if !props.Data.LastSuccess.IsZero() {
-		lastSuccess = "上次刷新：" + props.Data.LastSuccess.Local().Format("2006-01-02 15:04")
+	statusColor := func() core.Color {
+		if props.data().Connected {
+			return colors.Up()
+		}
+		return colors.Warn()
+	}
+	lastSuccess := func() string {
+		value := props.data().LastSuccess
+		if value.IsZero() {
+			return "上次刷新：尚未刷新"
+		}
+		return "上次刷新：" + value.Local().Format("2006-01-02 15:04")
 	}
 
 	refresh := ui.Button{
 		Text: "立即刷新", TestID: "refresh", Size: ui.SizeLarge,
-		Busy: func() bool { return props.Data.Loading }, BusyLabel: "刷新中…",
-		Disabled: func() bool { return props.Data.Loading || props.Data.NeedsLogin },
+		Busy: func() bool { return props.data().Loading }, BusyLabel: "刷新中…",
+		Disabled: func() bool { return props.data().Loading || props.data().NeedsLogin },
 	}
 	if props.OnRefresh != nil {
 		refresh.OnPress = props.OnRefresh
@@ -309,12 +327,12 @@ func workbenchHeader(cx *core.Scope, props WorkbenchProps, settingsOpen *core.Si
 			core.View{Style: core.Style{Gap: 4, FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0)}, Children: []core.Node{
 				core.Text{Content: "禅道助手", Role: core.RoleHeader, Style: ui.TypeHeading},
 				core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 8, Wrap: core.Wrap}, Children: []core.Node{
-					core.Text{Content: "账号：" + account, Style: ui.TypeBody, StyleFunc: ui.Colored(colors.Muted)},
+					core.Text{ContentFunc: func() string { return "账号：" + account() }, Style: ui.TypeBody, StyleFunc: ui.Colored(colors.Muted)},
 					core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 5}, Children: []core.Node{
-						core.View{Style: core.Style{Width: core.Pt(7), Height: core.Pt(7), CornerRadius: ui.RadiusFull, Background: statusColor()}},
-						core.Text{Content: connection, Style: ui.TypeCaption, StyleFunc: ui.Colored(statusColor)},
+						core.View{Style: core.Style{Width: core.Pt(7), Height: core.Pt(7), CornerRadius: ui.RadiusFull}, StyleFunc: func() core.Style { return core.Style{Background: statusColor()} }},
+						core.Text{ContentFunc: connection, Style: ui.TypeCaption, StyleFunc: ui.Colored(statusColor)},
 					}},
-					core.Text{Content: lastSuccess, Style: ui.TypeCaption, StyleFunc: ui.Colored(colors.Muted)},
+					core.Text{ContentFunc: lastSuccess, Style: ui.TypeCaption, StyleFunc: ui.Colored(colors.Muted)},
 				}},
 			}},
 			core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 8, Wrap: core.Wrap}, Children: []core.Node{
@@ -325,7 +343,7 @@ func workbenchHeader(cx *core.Scope, props WorkbenchProps, settingsOpen *core.Si
 	}
 }
 
-func kpiCard(cx *core.Scope, label string, value int, testID string) core.Node {
+func kpiCard(cx *core.Scope, label string, value func() int, testID string) core.Node {
 	colors := ui.ColorsOf(cx)
 	return core.View{
 		TestID: testID,
@@ -338,7 +356,7 @@ func kpiCard(cx *core.Scope, label string, value int, testID string) core.Node {
 		},
 		Children: []core.Node{
 			core.Text{Content: label, Style: ui.TypeBody, StyleFunc: ui.Colored(colors.Muted)},
-			core.Text{Content: strconv.Itoa(value), TestID: testID + "-value", Style: ui.TypeHeading.Merge(core.Style{FontSize: 28, LineHeight: 34}), StyleFunc: ui.Colored(colors.Text)},
+			core.Text{ContentFunc: func() string { return strconv.Itoa(value()) }, TestID: testID + "-value", Style: ui.TypeHeading.Merge(core.Style{FontSize: 28, LineHeight: 34}), StyleFunc: ui.Colored(colors.Text)},
 		},
 	}
 }

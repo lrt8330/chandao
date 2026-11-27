@@ -12,7 +12,7 @@ func loginPanel(cx *core.Scope, props WorkbenchProps) core.Node {
 	account := core.NewSignal(cx, "")
 	password := core.NewSignal(cx, "")
 	canSubmit := func() bool {
-		return strings.TrimSpace(account.Get()) != "" && password.Get() != "" && !props.Data.Loading
+		return strings.TrimSpace(account.Get()) != "" && password.Get() != "" && !props.data().Loading
 	}
 	submit := func() {
 		if !canSubmit() {

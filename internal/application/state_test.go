@@ -15,6 +15,9 @@ func TestDefaultSnapshot(t *testing.T) {
 	if !got.NotificationsEnabled {
 		t.Error("NotificationsEnabled = false, want true")
 	}
+	if got.PopupSeconds != 8 {
+		t.Errorf("PopupSeconds = %d, want 8", got.PopupSeconds)
+	}
 	if got.Initialized {
 		t.Error("Initialized = true, want false")
 	}
@@ -40,6 +43,20 @@ func TestSnapshotValidatePollSeconds(t *testing.T) {
 		snapshot.PollSeconds = seconds
 		if err := snapshot.Validate(); err == nil {
 			t.Errorf("Validate() with PollSeconds=%d succeeded, want error", seconds)
+		}
+	}
+	for _, seconds := range []int{0, 1, 8, 60} {
+		snapshot := application.DefaultSnapshot()
+		snapshot.PopupSeconds = seconds
+		if err := snapshot.Validate(); err != nil {
+			t.Errorf("Validate() with PopupSeconds=%d: %v", seconds, err)
+		}
+	}
+	for _, seconds := range []int{-1, 61} {
+		snapshot := application.DefaultSnapshot()
+		snapshot.PopupSeconds = seconds
+		if err := snapshot.Validate(); err == nil {
+			t.Errorf("Validate() with PopupSeconds=%d succeeded, want error", seconds)
 		}
 	}
 }

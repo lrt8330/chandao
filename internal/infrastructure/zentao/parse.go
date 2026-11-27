@@ -2,11 +2,13 @@ package zentao
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -22,6 +24,8 @@ var (
 	ErrDuplicateItemID     = errors.New("duplicate zentao item ID")
 	ErrIncompletePage      = errors.New("incomplete zentao assigned page")
 	ErrPaginationRequired  = errors.New("zentao assigned page requires pagination")
+
+	dtableDataPattern = regexp.MustCompile(`"data"\s*:\s*\[`)
 )
 
 // ParseAssignedTasks extracts unfinished tasks from an assigned-to page.
@@ -94,6 +98,8 @@ func readPaginationMetadata(doc *html.Node) (paginationMetadata, error) {
 				record("total", attribute.Val)
 			case "data-rec-per-page":
 				record("perPage", attribute.Val)
+			case "zui-create-dtable":
+				recordDtablePagination(attribute.Val, record)
 			case "id", "name", "class":
 				for _, token := range strings.Fields(strings.ToLower(attribute.Val)) {
 					marker := ""
@@ -143,6 +149,21 @@ func readPaginationMetadata(doc *html.Node) (paginationMetadata, error) {
 	return metadata, nil
 }
 
+func recordDtablePagination(config string, record func(string, string)) {
+	for _, field := range []struct {
+		marker string
+		key    string
+	}{
+		{marker: "total", key: "recTotal"},
+		{marker: "perPage", key: "recPerPage"},
+	} {
+		pattern := regexp.MustCompile(`"` + field.key + `"\s*:\s*([0-9]+)`)
+		if match := pattern.FindStringSubmatch(config); len(match) == 2 {
+			record(field.marker, match[1])
+		}
+	}
+}
+
 func decodeAssignedHTML(body []byte) ([]byte, error) {
 	if len(body) == 0 {
 		return body, nil
@@ -185,6 +206,13 @@ func parseAssigned(body []byte, pageURL string, spec assignedSpec) ([]domain.Ite
 	if err != nil {
 		return nil, fmt.Errorf("%w: parse HTML: %v", ErrUnexpectedStructure, err)
 	}
+	pagination, err := readPaginationMetadata(doc)
+	if err != nil {
+		return nil, fmt.Errorf("%w: pagination metadata: %v", ErrUnexpectedStructure, err)
+	}
+	if config, found := findDtableConfig(doc); found {
+		return parseDtableAssigned(base, config, pagination, spec)
+	}
 	table := findByID(doc, spec.tableID)
 	if table != nil && table.Data != "table" {
 		table = firstElement(table, "table")
@@ -212,10 +240,6 @@ func parseAssigned(body []byte, pageURL string, spec assignedSpec) ([]domain.Ite
 		} else {
 			return nil, fmt.Errorf("%w: %s table not found or not recognized", ErrUnexpectedStructure, spec.objectType)
 		}
-	}
-	pagination, err := readPaginationMetadata(doc)
-	if err != nil {
-		return nil, fmt.Errorf("%w: pagination metadata: %v", ErrUnexpectedStructure, err)
 	}
 	pageID, perPage, err := readPagePagination(base, pagination)
 	if err != nil {
@@ -269,6 +293,138 @@ func parseAssigned(body []byte, pageURL string, spec assignedSpec) ([]domain.Ite
 		}
 	}
 	return items, nil
+}
+
+func findDtableConfig(doc *html.Node) (string, bool) {
+	var config string
+	found := false
+	walkElements(doc, func(node *html.Node) {
+		if found {
+			return
+		}
+		if value := attr(node, "zui-create-dtable"); value != "" {
+			config = value
+			found = true
+		}
+	})
+	return config, found
+}
+
+type dtableRecord struct {
+	ID             json.Number `json:"id"`
+	Name           string      `json:"name"`
+	Title          string      `json:"title"`
+	Status         string      `json:"status"`
+	RawStatus      string      `json:"rawStatus"`
+	ProjectName    string      `json:"projectName"`
+	ProductName    string      `json:"productName"`
+	OpenedDate     string      `json:"openedDate"`
+	ResolvedDate   string      `json:"resolvedDate"`
+	ClosedDate     string      `json:"closedDate"`
+	LastEditedDate string      `json:"lastEditedDate"`
+}
+
+func parseDtableAssigned(base *url.URL, config string, pagination paginationMetadata, spec assignedSpec) ([]domain.Item, error) {
+	location := dtableDataPattern.FindStringIndex(config)
+	if location == nil {
+		return nil, fmt.Errorf("%w: %s dtable data not found", ErrUnexpectedStructure, spec.objectType)
+	}
+	decoder := json.NewDecoder(strings.NewReader(config[location[1]-1:]))
+	decoder.UseNumber()
+	var records []dtableRecord
+	if err := decoder.Decode(&records); err != nil {
+		return nil, fmt.Errorf("%w: decode %s dtable data: %v", ErrUnexpectedStructure, spec.objectType, err)
+	}
+	pageID, perPage, err := readPagePagination(base, pagination)
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]domain.Item, 0, len(records))
+	seen := make(map[string]struct{}, len(records))
+	for index, record := range records {
+		id := record.ID.String()
+		if id == "" || id == "0" {
+			return nil, fmt.Errorf("%s row %d: object ID must be a positive integer", spec.objectType, index+1)
+		}
+		title := record.Name
+		project := record.ProjectName
+		status := record.Status
+		if spec.itemType == domain.ItemBug {
+			title = record.Title
+			project = record.ProductName
+		} else if record.RawStatus != "" {
+			status = record.RawStatus
+		}
+		detailURL := dtableDetailURL(base, spec.objectType, id)
+		item := domain.Item{
+			ID:        id,
+			Type:      spec.itemType,
+			Title:     title,
+			Project:   project,
+			Status:    status,
+			UpdatedAt: record.updatedAt(),
+			URL:       detailURL,
+		}
+		if err := validateItem(item); err != nil {
+			return nil, fmt.Errorf("%s row %d: %w", spec.objectType, index+1, err)
+		}
+		if _, exists := seen[item.ID]; exists {
+			return nil, fmt.Errorf("%s row %d: %w: %s", spec.objectType, index+1, ErrDuplicateItemID, item.ID)
+		}
+		seen[item.ID] = struct{}{}
+		unfinished, err := spec.unfinished(item.Status)
+		if err != nil {
+			return nil, fmt.Errorf("%s row %d: %w", spec.objectType, index+1, err)
+		}
+		if unfinished {
+			items = append(items, item)
+		}
+	}
+
+	if pagination.hasTotal {
+		pageOffset := pageID - 1
+		expected := 0
+		complete := false
+		if pageOffset > pagination.total/perPage {
+			complete = true
+		} else {
+			remaining := pagination.total - pageOffset*perPage
+			expected = perPage
+			if remaining < expected {
+				expected = remaining
+			}
+			complete = len(records) >= remaining
+		}
+		if len(records) < expected {
+			return nil, fmt.Errorf("%w: page %d expected %d rows, got %d", ErrIncompletePage, pageID, expected, len(records))
+		}
+		if !complete {
+			collected := pageOffset*perPage + len(records)
+			return items, fmt.Errorf("%w: page %d collected %d of %d rows", ErrPaginationRequired, pageID, collected, pagination.total)
+		}
+	}
+	return items, nil
+}
+
+func (r dtableRecord) updatedAt() string {
+	for _, value := range []string{r.LastEditedDate, r.ResolvedDate, r.ClosedDate, r.OpenedDate} {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func dtableDetailURL(base *url.URL, objectType, id string) string {
+	query := url.Values{}
+	query.Set("m", objectType)
+	query.Set("f", "view")
+	query.Set(objectType+"ID", id)
+	resolved := base.ResolveReference(&url.URL{Path: "index.php", RawQuery: query.Encode()})
+	resolved.Fragment = ""
+	resolved.RawFragment = ""
+	return resolved.String()
 }
 
 func readPagePagination(pageURL *url.URL, metadata paginationMetadata) (int, int, error) {

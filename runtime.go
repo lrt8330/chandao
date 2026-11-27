@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -10,7 +11,6 @@ import (
 
 	"chandao/zentaotray/internal/application"
 	"chandao/zentaotray/internal/domain"
-	"chandao/zentaotray/internal/infrastructure/notification"
 	"chandao/zentaotray/internal/infrastructure/security"
 	"chandao/zentaotray/internal/infrastructure/storage"
 	"chandao/zentaotray/internal/infrastructure/zentao"
@@ -19,11 +19,19 @@ import (
 )
 
 const (
-	zentaoBaseURL       = "http://192.168.2.225/biz/"
-	accountSecretKey    = "account"
-	passwordSecretKey   = "password"
-	summaryNotification = "summary"
+	defaultZentaoBaseURL = "http://192.168.2.225/biz/"
+	accountSecretKey     = "account"
+	passwordSecretKey    = "password"
 )
+
+var zentaoBaseURL = configuredZentaoBaseURL()
+
+func configuredZentaoBaseURL() string {
+	if value := strings.TrimSpace(os.Getenv("ZENTAO_BASE_URL")); value != "" {
+		return value
+	}
+	return defaultZentaoBaseURL
+}
 
 // workbenchRuntime coordinates blocking session work with the UI goroutine.
 // Controller callbacks and all signal writes are marshaled through cx.Post.
@@ -32,6 +40,7 @@ type workbenchRuntime struct {
 	data        *core.Signal[ui.WorkbenchData]
 	selectedKey *core.Signal[string]
 	showWindow  func()
+	popups      *ui.MessagePopupManager
 	credentials security.SecretsCredentialStore
 	statePath   string
 
@@ -54,6 +63,7 @@ func newWorkbenchRuntime(cx *core.Scope, data *core.Signal[ui.WorkbenchData], se
 		data:        data,
 		selectedKey: selectedKey,
 		showWindow:  showWindow,
+		popups:      ui.NewMessagePopupManager(cx, func(key string) { selectedKey.Set(key); showWindow() }),
 		credentials: security.SecretsCredentialStore{Secrets: cx.Secrets()},
 		statePath:   filepath.Join(cx.DataDir(), "state.json"),
 		ctx:         ctx,
@@ -62,12 +72,6 @@ func newWorkbenchRuntime(cx *core.Scope, data *core.Signal[ui.WorkbenchData], se
 }
 
 func (r *workbenchRuntime) start() {
-	r.cx.OnNotificationPress(func(id string) {
-		if id != summaryNotification {
-			r.selectedKey.Set(id)
-		}
-		r.showWindow()
-	})
 	r.cx.OnQuit(func(context.Context) { r.stop() })
 	go r.loadSavedCredentials()
 }
@@ -138,7 +142,7 @@ func (r *workbenchRuntime) login(account, password string) {
 				r.cx.RequestNotificationPermission(nil)
 			}
 		})
-		r.startController(controller, account)
+		r.startPollingController(controller, account)
 	}()
 }
 
@@ -193,7 +197,7 @@ func (r *workbenchRuntime) newController(account, password string) (*application
 		r.ctx,
 		zentao.NewService(client),
 		storage.FileSnapshotStore{Path: r.statePath},
-		notification.WindowsNotifier{Cx: r.cx},
+		messagePopupNotifier{manager: r.popups, duration: func() int { return r.data.Get().PopupSeconds }},
 	)
 }
 
@@ -225,7 +229,7 @@ func (r *workbenchRuntime) refresh() {
 	}()
 }
 
-func (r *workbenchRuntime) updateSettings(pollSeconds int, notificationsEnabled bool) {
+func (r *workbenchRuntime) updateSettings(pollSeconds int, notificationsEnabled bool, popupSeconds int) {
 	go func() {
 		r.opMu.Lock()
 		defer r.opMu.Unlock()
@@ -235,7 +239,7 @@ func (r *workbenchRuntime) updateSettings(pollSeconds int, notificationsEnabled 
 			r.postError("请先登录后再保存设置。", true)
 			return
 		}
-		if err := controller.UpdateSettings(r.ctx, pollSeconds, notificationsEnabled); err != nil {
+		if err := controller.UpdateSettings(r.ctx, pollSeconds, notificationsEnabled, popupSeconds); err != nil {
 			r.postControllerError(generation, account, err)
 			return
 		}
@@ -246,6 +250,7 @@ func (r *workbenchRuntime) updateSettings(pollSeconds int, notificationsEnabled 
 			r.data.Update(func(data ui.WorkbenchData) ui.WorkbenchData {
 				data.PollSeconds = pollSeconds
 				data.NotificationsEnabled = notificationsEnabled
+				data.PopupSeconds = popupSeconds
 				data.ErrorMessage = ""
 				return data
 			})
@@ -339,6 +344,14 @@ func (r *workbenchRuntime) isCurrent(generation uint64) bool {
 }
 
 func (r *workbenchRuntime) startController(controller *application.Controller, account string) {
+	r.startControllerWithMode(controller, account, true)
+}
+
+func (r *workbenchRuntime) startPollingController(controller *application.Controller, account string) {
+	r.startControllerWithMode(controller, account, false)
+}
+
+func (r *workbenchRuntime) startControllerWithMode(controller *application.Controller, account string, refreshImmediately bool) {
 	r.controllerMu.Lock()
 	generation := r.generation
 	r.controllerMu.Unlock()
@@ -351,7 +364,20 @@ func (r *workbenchRuntime) startController(controller *application.Controller, a
 		})
 	}
 	onError := func(err error) { r.postControllerError(generation, account, err) }
-	controller.Start(r.ctx, onResult, onError)
+	if refreshImmediately {
+		controller.Start(r.ctx, onResult, onError)
+		return
+	}
+	controller.StartPolling(r.ctx, onResult, onError)
+}
+
+type messagePopupNotifier struct {
+	manager  *ui.MessagePopupManager
+	duration func() int
+}
+
+func (n messagePopupNotifier) Notify(_ context.Context, changes []domain.Change) {
+	n.manager.Show(changes, n.duration())
 }
 
 func snapshotItems(items map[string]domain.Item) []domain.Item {
@@ -374,6 +400,7 @@ func applyRefresh(current ui.WorkbenchData, account string, result application.R
 	current.LastSuccess = result.Snapshot.LastSuccess
 	current.PollSeconds = result.Snapshot.PollSeconds
 	current.NotificationsEnabled = result.Snapshot.NotificationsEnabled
+	current.PopupSeconds = result.Snapshot.PopupSeconds
 	return current
 }
 

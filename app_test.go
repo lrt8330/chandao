@@ -111,11 +111,11 @@ func TestTrayMenuReflectsWorkbenchState(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			menu := buildTrayMenu(tc.data, func() {}, func() {}, func(int, bool) {}, func() {})
+			menu := buildTrayMenu(tc.data, func() {}, func() {}, func(int, bool, int) {}, func() {})
 			if len(menu) != 5 {
 				t.Fatalf("menu has %d items, want 5", len(menu))
 			}
-			for i, want := range []string{"打开工作台", "立即刷新", "", "桌面通知", "退出"} {
+			for i, want := range []string{"打开工作台", "立即刷新", "", "消息弹窗", "退出"} {
 				if menu[i].Label != want {
 					t.Errorf("menu[%d].Label = %q, want %q", i, menu[i].Label, want)
 				}
@@ -144,11 +144,12 @@ func TestTrayMenuActionsUseCurrentSettings(t *testing.T) {
 			var opened, refreshed, quit int
 			var gotPollSeconds int
 			var gotNotifications bool
-			menu := buildTrayMenu(ui.WorkbenchData{PollSeconds: 75, NotificationsEnabled: enabled},
+			var gotPopupSeconds int
+			menu := buildTrayMenu(ui.WorkbenchData{PollSeconds: 75, NotificationsEnabled: enabled, PopupSeconds: 12},
 				func() { opened++ },
 				func() { refreshed++ },
-				func(pollSeconds int, notifications bool) {
-					gotPollSeconds, gotNotifications = pollSeconds, notifications
+				func(pollSeconds int, notifications bool, popupSeconds int) {
+					gotPollSeconds, gotNotifications, gotPopupSeconds = pollSeconds, notifications, popupSeconds
 				},
 				func() { quit++ },
 			)
@@ -159,8 +160,8 @@ func TestTrayMenuActionsUseCurrentSettings(t *testing.T) {
 			if opened != 1 || refreshed != 1 || quit != 1 {
 				t.Fatalf("open/refresh/quit calls = %d/%d/%d, want 1/1/1", opened, refreshed, quit)
 			}
-			if gotPollSeconds != 75 || gotNotifications == enabled {
-				t.Fatalf("settings callback = (%d, %v), want (75, %v)", gotPollSeconds, gotNotifications, !enabled)
+			if gotPollSeconds != 75 || gotNotifications == enabled || gotPopupSeconds != 12 {
+				t.Fatalf("settings callback = (%d, %v, %d), want (75, %v, 12)", gotPollSeconds, gotNotifications, gotPopupSeconds, !enabled)
 			}
 		})
 	}
@@ -242,39 +243,6 @@ func TestAppForcedQuitAllowsWindowClose(t *testing.T) {
 	}
 }
 
-func TestAppNotificationPressShowsWindowAndSelectsKey(t *testing.T) {
-	app, cx, runtime := startMountedWorkbench(t)
-	window := cx.MainWindow()
-	if window == nil {
-		t.Fatal("main window is missing")
-	}
-	app.GrantPermission(core.PermissionNotifications)
-	var showErr error
-	app.Post(func() {
-		showErr = cx.ShowNotification(core.Notification{ID: "bug:7", Title: "Bug 状态变化"}, nil)
-	})
-	app.Settle()
-	if showErr != nil {
-		t.Fatal(showErr)
-	}
-	if len(app.Notifications) != 1 {
-		t.Fatalf("shown notifications = %d, want 1", len(app.Notifications))
-	}
-	app.Post(window.Hide)
-	app.Settle()
-
-	app.PressNotification("bug:7")
-	app.Post(func() {
-		if window.Closed() || !window.Visible() {
-			t.Fatal("notification press did not show the main window")
-		}
-		if got := runtime.selectedKey.Get(); got != "bug:7" {
-			t.Fatalf("selected key after notification press = %q, want bug:7", got)
-		}
-	})
-	app.Settle()
-}
-
 func startMountedWorkbench(t *testing.T) (*nsgotest.App, *core.Scope, *workbenchRuntime) {
 	t.Helper()
 	var appScope *core.Scope
@@ -287,6 +255,17 @@ func startMountedWorkbench(t *testing.T) (*nsgotest.App, *core.Scope, *workbench
 		nsgotest.Environment(core.Environment{OS: core.OSWindows, Idiom: core.IdiomDesktop, Locale: "zh-CN"}),
 	)
 	return app, appScope, runtime
+}
+
+func TestConfiguredZentaoBaseURL(t *testing.T) {
+	t.Setenv("ZENTAO_BASE_URL", "  http://127.0.0.1:8080/biz/  ")
+	if got := configuredZentaoBaseURL(); got != "http://127.0.0.1:8080/biz/" {
+		t.Fatalf("configuredZentaoBaseURL() = %q, want trimmed environment URL", got)
+	}
+	t.Setenv("ZENTAO_BASE_URL", " \t ")
+	if got := configuredZentaoBaseURL(); got != defaultZentaoBaseURL {
+		t.Fatalf("configuredZentaoBaseURL() = %q, want default %q", got, defaultZentaoBaseURL)
+	}
 }
 
 func TestSnapshotItemsSortsByStableKey(t *testing.T) {
@@ -317,7 +296,7 @@ func TestApplyRefreshUpdatesWorkbenchData(t *testing.T) {
 	got := applyRefresh(current, "test.account", application.RefreshResult{
 		Snapshot: application.Snapshot{
 			Items: map[string]domain.Item{item.Key(): item}, LastSuccess: lastSuccess,
-			PollSeconds: 90, NotificationsEnabled: false, Initialized: true,
+			PollSeconds: 90, NotificationsEnabled: false, PopupSeconds: 12, Initialized: true,
 		},
 		Changes: changes,
 	})
@@ -325,7 +304,7 @@ func TestApplyRefreshUpdatesWorkbenchData(t *testing.T) {
 	if got.Account != "test.account" || got.NeedsLogin || !got.Connected || got.Loading || got.ErrorMessage != "" {
 		t.Fatalf("session state was not applied: %+v", got)
 	}
-	if !got.LastSuccess.Equal(lastSuccess) || got.PollSeconds != 90 || got.NotificationsEnabled {
+	if !got.LastSuccess.Equal(lastSuccess) || got.PollSeconds != 90 || got.NotificationsEnabled || got.PopupSeconds != 12 {
 		t.Fatalf("refresh metadata was not applied: %+v", got)
 	}
 	if !reflect.DeepEqual(got.Items, []domain.Item{item}) || !reflect.DeepEqual(got.Changes, changes) {

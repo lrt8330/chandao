@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"html"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -89,6 +90,63 @@ func TestParseAssignedBugsModern(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("items = %#v, want %#v", got, want)
 	}
+}
+
+func TestParseAssignedTasksDtable(t *testing.T) {
+	body := []byte(dtableAssignedPage(2, 100,
+		`{"id":1,"name":"已完成任务","status":"已完成","rawStatus":"done","projectName":"示例项目","lastEditedDate":"2026-11-27 10:00:00"}`,
+		`{"id":2,"name":"进行中的任务","status":"进行中","rawStatus":"doing","projectName":"另一个项目","lastEditedDate":"2026-11-27 11:00:00"}`,
+	))
+	got, err := ParseAssignedTasks(body, assignedTasksPageURL)
+	if err != nil {
+		t.Fatalf("ParseAssignedTasks: %v", err)
+	}
+	want := []domain.Item{{
+		ID: "2", Type: domain.ItemTask, Title: "进行中的任务", Project: "另一个项目",
+		Status: "doing", UpdatedAt: "2026-11-27 11:00:00",
+		URL: "https://zentao.example.invalid/biz/index.php?f=view&m=task&taskID=2",
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("items = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseAssignedBugsDtableFallsBackToOpenedDate(t *testing.T) {
+	body := []byte(dtableAssignedPage(2, 100,
+		`{"id":3,"title":"活动缺陷","status":"active","productName":"示例产品","openedDate":"2026-11-26 09:00:00"}`,
+		`{"id":4,"title":"已解决缺陷","status":"resolved","productName":"示例产品","lastEditedDate":"2026-11-27 12:00:00"}`,
+	))
+	got, err := ParseAssignedBugs(body, assignedBugsPageURL)
+	if err != nil {
+		t.Fatalf("ParseAssignedBugs: %v", err)
+	}
+	want := []domain.Item{{
+		ID: "3", Type: domain.ItemBug, Title: "活动缺陷", Project: "示例产品",
+		Status: "active", UpdatedAt: "2026-11-26 09:00:00",
+		URL: "https://zentao.example.invalid/biz/index.php?bugID=3&f=view&m=bug",
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("items = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseAssignedTasksDtablePagination(t *testing.T) {
+	body := []byte(dtableAssignedPage(3, 2,
+		`{"id":1,"name":"第一页任务一","rawStatus":"wait","projectName":"示例项目","lastEditedDate":"2026-11-27"}`,
+		`{"id":2,"name":"第一页任务二","rawStatus":"doing","projectName":"示例项目","lastEditedDate":"2026-11-27"}`,
+	))
+	items, err := ParseAssignedTasks(body, assignedTasksPageURL+"?pageID=1&recPerPage=2")
+	if !errors.Is(err, ErrPaginationRequired) {
+		t.Fatalf("items = %#v, error = %v, want ErrPaginationRequired", items, err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("items = %#v, want both rows parsed before pagination", items)
+	}
+}
+
+func dtableAssignedPage(total, perPage int, records ...string) string {
+	config := fmt.Sprintf(`{"data":[%s],"recTotal":%d,"recPerPage":%d,"onRenderCell":window.renderCell}`, strings.Join(records, ","), total, perPage)
+	return `<div zui-create-dtable="` + html.EscapeString(config) + `"></div>`
 }
 
 func TestParseAssignedTasksLegacy(t *testing.T) {
@@ -492,6 +550,7 @@ func TestHasMorePagesReadsPaginationMetadata(t *testing.T) {
 		{name: "more pages", body: `<input id="recTotal" value="21"><input id="recPerPage" value="20">`, want: true},
 		{name: "class markers", body: `<span class="recTotal">41</span><span class="recPerPage">20</span>`, want: true},
 		{name: "data attributes", body: `<table data-rec-total="2" data-rec-per-page="1"></table>`, want: true},
+		{name: "dtable config", body: dtableAssignedPage(21, 20), want: true},
 		{name: "partial metadata", body: `<input id="recTotal" value="2">`, wantErr: true},
 		{name: "malformed metadata", body: `<input id="recTotal" value="many"><input id="recPerPage" value="20">`, wantErr: true},
 	}

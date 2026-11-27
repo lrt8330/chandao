@@ -55,13 +55,14 @@ func NewController(ctx context.Context, gateway ZentaoGateway, store SnapshotSto
 }
 
 // UpdateSettings validates and persists polling and notification preferences.
-func (c *Controller) UpdateSettings(ctx context.Context, pollSeconds int, notificationsEnabled bool) error {
+func (c *Controller) UpdateSettings(ctx context.Context, pollSeconds int, notificationsEnabled bool, popupSeconds int) error {
 	c.refreshMu.Lock()
 	defer c.refreshMu.Unlock()
 
 	snapshot := c.snapshot
 	snapshot.PollSeconds = pollSeconds
 	snapshot.NotificationsEnabled = notificationsEnabled
+	snapshot.PopupSeconds = popupSeconds
 	if err := snapshot.Validate(); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidSettings, err)
 	}
@@ -78,6 +79,16 @@ func (c *Controller) UpdateSettings(ctx context.Context, pollSeconds int, notifi
 
 // Start begins an immediate refresh followed by polling until stopped.
 func (c *Controller) Start(ctx context.Context, onResult func(RefreshResult), onError func(error)) {
+	c.start(ctx, true, onResult, onError)
+}
+
+// StartPolling resumes periodic refreshes after an explicit Refresh has already
+// populated the controller snapshot.
+func (c *Controller) StartPolling(ctx context.Context, onResult func(RefreshResult), onError func(error)) {
+	c.start(ctx, false, onResult, onError)
+}
+
+func (c *Controller) start(ctx context.Context, refreshImmediately bool, onResult func(RefreshResult), onError func(error)) {
 	c.lifecycleMu.Lock()
 	defer c.lifecycleMu.Unlock()
 	if c.cancel != nil {
@@ -88,7 +99,7 @@ func (c *Controller) Start(ctx context.Context, onResult func(RefreshResult), on
 	done := make(chan struct{})
 	c.cancel = cancel
 	c.done = done
-	go c.run(pollCtx, done, onResult, onError)
+	go c.run(pollCtx, done, refreshImmediately, onResult, onError)
 }
 
 // Stop cancels polling and waits for the controller goroutine to exit.
@@ -104,7 +115,7 @@ func (c *Controller) Stop() {
 	c.done = nil
 }
 
-func (c *Controller) run(ctx context.Context, done chan struct{}, onResult func(RefreshResult), onError func(error)) {
+func (c *Controller) run(ctx context.Context, done chan struct{}, refreshImmediately bool, onResult func(RefreshResult), onError func(error)) {
 	defer close(done)
 	select {
 	case <-ctx.Done():
@@ -124,7 +135,9 @@ func (c *Controller) run(ctx context.Context, done chan struct{}, onResult func(
 			onResult(result)
 		}
 	}
-	report()
+	if refreshImmediately {
+		report()
+	}
 
 	ticker := time.NewTicker(c.pollInterval())
 	defer ticker.Stop()

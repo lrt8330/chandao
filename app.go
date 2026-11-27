@@ -26,6 +26,7 @@ func mountWorkbench(cx *core.Scope) *workbenchRuntime {
 		NeedsLogin:           true,
 		PollSeconds:          60,
 		NotificationsEnabled: true,
+		PopupSeconds:         8,
 	}, nil)
 	selectedKey := core.NewSignal(cx, "")
 
@@ -94,17 +95,17 @@ func workbenchTrayOptions(showWindow func(), menu func() []desktop.MenuItem) des
 	}
 }
 
-func buildTrayMenu(data ui.WorkbenchData, showWindow, refresh func(), updateSettings func(int, bool), quit func()) []desktop.MenuItem {
+func buildTrayMenu(data ui.WorkbenchData, showWindow, refresh func(), updateSettings func(int, bool, int), quit func()) []desktop.MenuItem {
 	return []desktop.MenuItem{
 		{Label: "打开工作台", OnSelect: showWindow},
 		{Label: "立即刷新", Disabled: data.Loading || data.NeedsLogin, OnSelect: refresh},
 		{Separator: true},
 		{
-			Label:     "桌面通知",
+			Label:     "消息弹窗",
 			Checkable: true,
 			Checked:   data.NotificationsEnabled,
 			OnSelect: func() {
-				updateSettings(data.PollSeconds, !data.NotificationsEnabled)
+				updateSettings(data.PollSeconds, !data.NotificationsEnabled, data.PopupSeconds)
 			},
 		},
 		{Label: "退出", OnSelect: quit},

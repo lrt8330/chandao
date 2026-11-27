@@ -13,14 +13,15 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"regexp"
-	"strconv"
 	"strings"
+	"time"
 )
 
 const (
 	defaultReferer         = "/biz/"
 	DefaultMaxResponseSize = 8 << 20
 	defaultRecPerPage      = 100
+	defaultRequestTimeout  = 30 * time.Second
 )
 
 var (
@@ -42,6 +43,7 @@ type Client struct {
 	HTTPClient       *http.Client
 	Jar              http.CookieJar
 	MaxResponseBytes int64
+	RequestTimeout   time.Duration
 }
 
 // New creates a Zentao client with an isolated cookie jar.
@@ -66,6 +68,7 @@ func New(baseURL, account, password string) (*Client, error) {
 		HTTPClient:       &http.Client{Jar: jar},
 		Jar:              jar,
 		MaxResponseBytes: DefaultMaxResponseSize,
+		RequestTimeout:   defaultRequestTimeout,
 	}, nil
 }
 
@@ -84,7 +87,7 @@ func (c *Client) Login(ctx context.Context) error {
 		"keepLogin":        {"0"},
 		"captcha":          {""},
 	}
-	body, err := c.request(ctx, http.MethodPost, "user-login.html", form, "application/x-www-form-urlencoded")
+	body, err := c.request(ctx, http.MethodPost, "index.php?m=user&f=login", form, "application/x-www-form-urlencoded")
 	if err != nil {
 		return fmt.Errorf("submit zentao login: %w", err)
 	}
@@ -111,7 +114,10 @@ func (c *Client) FetchAssignedTasks(ctx context.Context) ([]byte, error) {
 
 // FetchAssignedTasksPage returns one raw page of the current user's assigned tasks.
 func (c *Client) FetchAssignedTasksPage(ctx context.Context, pageID, recPerPage int) ([]byte, error) {
-	return c.fetchAssignedPage(ctx, "my-task-type=assignedTo.html", pageID, recPerPage)
+	if pageID <= 0 || recPerPage <= 0 {
+		return nil, ErrInvalidPagination
+	}
+	return c.fetchAssignedPage(ctx, assignedPagePath("task", pageID, recPerPage))
 }
 
 // FetchAssignedBugs returns the raw first page of the current user's assigned bugs.
@@ -121,15 +127,22 @@ func (c *Client) FetchAssignedBugs(ctx context.Context) ([]byte, error) {
 
 // FetchAssignedBugsPage returns one raw page of the current user's assigned bugs.
 func (c *Client) FetchAssignedBugsPage(ctx context.Context, pageID, recPerPage int) ([]byte, error) {
-	return c.fetchAssignedPage(ctx, "my-bug-type=assignedTo.html", pageID, recPerPage)
-}
-
-func (c *Client) fetchAssignedPage(ctx context.Context, path string, pageID, recPerPage int) ([]byte, error) {
 	if pageID <= 0 || recPerPage <= 0 {
 		return nil, ErrInvalidPagination
 	}
-	query := url.Values{"pageID": {strconv.Itoa(pageID)}, "recPerPage": {strconv.Itoa(recPerPage)}}
-	body, err := c.request(ctx, http.MethodGet, path+"?"+query.Encode(), nil, "")
+	return c.fetchAssignedPage(ctx, assignedPagePath("bug", pageID, recPerPage))
+}
+
+func assignedPagePath(objectType string, pageID, recPerPage int) string {
+	method := "task"
+	if objectType == "bug" {
+		method = "bug"
+	}
+	return fmt.Sprintf("index.php?m=my&f=%s&browseType=assignedTo&param=0&orderBy=id_desc&recTotal=0&recPerPage=%d&pageID=%d", method, recPerPage, pageID)
+}
+
+func (c *Client) fetchAssignedPage(ctx context.Context, path string) ([]byte, error) {
+	body, err := c.request(ctx, http.MethodGet, path, nil, "")
 	if err != nil {
 		return nil, fmt.Errorf("fetch zentao assigned page: %w", err)
 	}
@@ -177,7 +190,7 @@ func isLoginPage(body []byte) bool {
 }
 
 func (c *Client) randomChallenge(ctx context.Context) (string, error) {
-	body, err := c.request(ctx, http.MethodGet, "user-refreshRandom.html", nil, "")
+	body, err := c.request(ctx, http.MethodGet, "index.php?m=user&f=refreshRandom", nil, "")
 	if err != nil {
 		return "", fmt.Errorf("get zentao login challenge: %w", err)
 	}
@@ -203,6 +216,13 @@ func (c *Client) request(ctx context.Context, method, path string, form url.Valu
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	timeout := c.RequestTimeout
+	if timeout <= 0 {
+		timeout = defaultRequestTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	var body io.Reader
 	if form != nil {
 		body = strings.NewReader(form.Encode())
@@ -217,6 +237,7 @@ func (c *Client) request(ctx context.Context, method, path string, form url.Valu
 	if method == http.MethodPost {
 		req.Header.Set("Accept", "application/json, text/html;q=0.9, */*;q=0.8")
 		req.Header.Set("X-Requested-With", "XMLHttpRequest")
+		req.Header.Set("Referer", c.BaseURL+"index.php?m=user&f=login")
 	} else {
 		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8")
 	}

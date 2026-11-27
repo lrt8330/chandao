@@ -210,7 +210,7 @@ func TestRefreshNotificationCanUpdateSettings(t *testing.T) {
 	controller := newTestController(t, gateway, store, notifier)
 	settingsDone := make(chan error, 1)
 	notifier.hook = func() {
-		settingsDone <- controller.UpdateSettings(context.Background(), 30, true)
+		settingsDone <- controller.UpdateSettings(context.Background(), 30, true, 12)
 	}
 	refreshDone := make(chan error, 1)
 	go func() {
@@ -238,7 +238,7 @@ func TestRefreshNotificationCanUpdateSettings(t *testing.T) {
 	if saveCalls != 2 {
 		t.Errorf("Save() calls = %d, want 2", saveCalls)
 	}
-	if saved.PollSeconds != 30 || !saved.NotificationsEnabled || saved.Items[newItem.Key()] != newItem {
+	if saved.PollSeconds != 30 || !saved.NotificationsEnabled || saved.PopupSeconds != 12 || saved.Items[newItem.Key()] != newItem {
 		t.Errorf("final snapshot = %#v, want updated settings and new baseline", saved)
 	}
 }
@@ -332,6 +332,24 @@ func TestStartRefreshesImmediatelyAndStopWaits(t *testing.T) {
 	controller.Stop()
 }
 
+func TestStartPollingSkipsImmediateRefresh(t *testing.T) {
+	item := testItem("1", domain.ItemTask, "doing")
+	gateway := &fakeGateway{items: []domain.Item{item}}
+	store := &fakeStore{snapshot: application.DefaultSnapshot()}
+	controller := newTestController(t, gateway, store, &fakeNotifier{})
+	if _, err := controller.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	controller.StartPolling(context.Background(), nil, nil)
+	time.Sleep(50 * time.Millisecond)
+	loginCalls, fetchCalls := gateway.counts()
+	if loginCalls != 1 || fetchCalls != 1 {
+		t.Errorf("gateway calls after StartPolling = (%d logins, %d fetches), want (1, 1)", loginCalls, fetchCalls)
+	}
+	controller.Stop()
+}
+
 func TestConcurrentRefreshIsSerialized(t *testing.T) {
 	fetchStarted := make(chan struct{}, 2)
 	continueFetch := make(chan struct{})
@@ -401,7 +419,7 @@ func TestUpdateSettingsWaitsForInFlightRefresh(t *testing.T) {
 	}
 	go func() {
 		close(settingsStarted)
-		settingsDone <- controller.UpdateSettings(context.Background(), 30, false)
+		settingsDone <- controller.UpdateSettings(context.Background(), 30, false, 0)
 	}()
 	<-settingsStarted
 	select {
@@ -424,7 +442,7 @@ func TestUpdateSettingsWaitsForInFlightRefresh(t *testing.T) {
 	if saveCalls != 2 {
 		t.Errorf("Save() calls = %d, want 2", saveCalls)
 	}
-	if saved.PollSeconds != 30 || saved.NotificationsEnabled || !saved.Initialized {
+	if saved.PollSeconds != 30 || saved.NotificationsEnabled || saved.PopupSeconds != 0 || !saved.Initialized {
 		t.Errorf("final snapshot = %#v, want initialized snapshot with settings (30, false)", saved)
 	}
 }
@@ -434,7 +452,7 @@ func TestUpdateSettingsSaveFailureDoesNotChangeSettings(t *testing.T) {
 	store := &fakeStore{snapshot: application.DefaultSnapshot(), saveErr: saveErr}
 	controller := newTestController(t, &fakeGateway{}, store, &fakeNotifier{})
 
-	if err := controller.UpdateSettings(context.Background(), 30, false); !errors.Is(err, saveErr) {
+	if err := controller.UpdateSettings(context.Background(), 30, false, 8); !errors.Is(err, saveErr) {
 		t.Fatalf("UpdateSettings() error = %v, want wrapped save error", err)
 	}
 	saved, _ := store.state()
@@ -454,7 +472,7 @@ func TestUpdateSettingsValidatesAndPersistsWithoutChangingBaseline(t *testing.T)
 	controller := newTestController(t, &fakeGateway{}, store, &fakeNotifier{})
 
 	for _, seconds := range []int{-1, 0, 29, 301} {
-		if err := controller.UpdateSettings(context.Background(), seconds, false); !errors.Is(err, application.ErrInvalidSettings) {
+		if err := controller.UpdateSettings(context.Background(), seconds, false, 8); !errors.Is(err, application.ErrInvalidSettings) {
 			t.Errorf("UpdateSettings(%d) error = %v, want ErrInvalidSettings", seconds, err)
 		}
 	}
@@ -465,17 +483,18 @@ func TestUpdateSettingsValidatesAndPersistsWithoutChangingBaseline(t *testing.T)
 	for _, settings := range []struct {
 		seconds       int
 		notifications bool
-	}{{seconds: 30, notifications: false}, {seconds: 300, notifications: true}} {
-		if err := controller.UpdateSettings(context.Background(), settings.seconds, settings.notifications); err != nil {
-			t.Fatalf("UpdateSettings(%d, %t) error = %v", settings.seconds, settings.notifications, err)
+		popupSeconds  int
+	}{{seconds: 30, notifications: false, popupSeconds: 0}, {seconds: 300, notifications: true, popupSeconds: 60}} {
+		if err := controller.UpdateSettings(context.Background(), settings.seconds, settings.notifications, settings.popupSeconds); err != nil {
+			t.Fatalf("UpdateSettings(%d, %t, %d) error = %v", settings.seconds, settings.notifications, settings.popupSeconds, err)
 		}
 	}
 	saved, saveCalls := store.state()
 	if saveCalls != 2 {
 		t.Errorf("Save() calls = %d, want 2", saveCalls)
 	}
-	if saved.PollSeconds != 300 || !saved.NotificationsEnabled {
-		t.Errorf("saved settings = (%d, %t), want (300, true)", saved.PollSeconds, saved.NotificationsEnabled)
+	if saved.PollSeconds != 300 || !saved.NotificationsEnabled || saved.PopupSeconds != 60 {
+		t.Errorf("saved settings = (%d, %t, %d), want (300, true, 60)", saved.PollSeconds, saved.NotificationsEnabled, saved.PopupSeconds)
 	}
 	if !saved.Initialized || !saved.LastSuccess.Equal(lastSuccess) || !reflect.DeepEqual(saved.Items, snapshot.Items) {
 		t.Errorf("UpdateSettings() changed baseline: %#v", saved)

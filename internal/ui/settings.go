@@ -10,9 +10,11 @@ import (
 )
 
 const (
-	minPollSeconds = 30
-	maxPollSeconds = 300
-	pollErrorText  = "轮询间隔必须是 30 到 300 之间的整数"
+	minPollSeconds  = 30
+	maxPollSeconds  = 300
+	maxPopupSeconds = 60
+	pollErrorText   = "轮询间隔必须是 30 到 300 之间的整数"
+	popupErrorText  = "消息弹窗保留时间必须是 0 到 60 之间的整数"
 )
 
 func settingsButton(open *core.Signal[bool]) core.Node {
@@ -26,7 +28,9 @@ func settingsDialog(cx *core.Scope, props WorkbenchProps, open *core.Signal[bool
 	colors := ui.ColorsOf(cx)
 	pollText := core.NewSignal(cx, strconv.Itoa(props.data().PollSeconds))
 	notifications := core.NewSignal(cx, props.data().NotificationsEnabled)
+	popupText := core.NewSignal(cx, strconv.Itoa(props.data().PopupSeconds))
 	validationError := core.NewSignal(cx, "")
+	popupError := core.NewSignal(cx, "")
 	close := func() { open.Set(false) }
 	save := func() {
 		seconds, err := strconv.Atoi(strings.TrimSpace(pollText.Get()))
@@ -34,8 +38,13 @@ func settingsDialog(cx *core.Scope, props WorkbenchProps, open *core.Signal[bool
 			validationError.Set(pollErrorText)
 			return
 		}
+		popupSeconds, err := strconv.Atoi(strings.TrimSpace(popupText.Get()))
+		if err != nil || popupSeconds < 0 || popupSeconds > maxPopupSeconds {
+			popupError.Set(popupErrorText)
+			return
+		}
 		if props.OnSettings != nil {
-			props.OnSettings(seconds, notifications.Get())
+			props.OnSettings(seconds, notifications.Get(), popupSeconds)
 		}
 		close()
 	}
@@ -54,11 +63,13 @@ func settingsDialog(cx *core.Scope, props WorkbenchProps, open *core.Signal[bool
 		data := props.data()
 		pollText.Set(strconv.Itoa(data.PollSeconds))
 		notifications.Set(data.NotificationsEnabled)
+		popupText.Set(strconv.Itoa(data.PopupSeconds))
 		validationError.Set("")
+		popupError.Set("")
 	})
 
 	return ui.Dialog{
-		TestID: "settings-dialog", Title: "设置", Description: "调整自动刷新和桌面通知。",
+		TestID: "settings-dialog", Title: "设置", Description: "调整自动刷新、消息弹窗和桌面通知。",
 		Open: open.Get,
 		OnOpenChange: func(shown bool, _ base.Reason) {
 			if !shown {
@@ -96,15 +107,44 @@ func settingsDialog(cx *core.Scope, props WorkbenchProps, open *core.Signal[bool
 					},
 				},
 			}},
+			core.View{Style: core.Style{Gap: 8}, Children: []core.Node{
+				core.Text{Content: "消息弹窗保留时间（秒）", Style: ui.TypeLabel, StyleFunc: ui.Colored(colors.Text)},
+				ui.Input{
+					TestID: "popup-seconds", Label: "消息弹窗保留时间（秒）", Placeholder: "0–60",
+					Value: popupText.Get,
+					OnChange: func(text string) {
+						popupText.Set(text)
+						if popupError.Get() != "" {
+							popupError.Set("")
+						}
+					},
+					Invalid: func() bool { return popupError.Get() != "" },
+					Style:   core.Style{FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0)},
+				},
+				core.Text{Content: "0 表示一直保留；鼠标悬停可暂停自动消失", Style: ui.TypeCaption, StyleFunc: ui.Colored(colors.Muted)},
+				core.Show{
+					When: func() bool { return popupError.Get() != "" },
+					Then: func(cx *core.Scope) core.Node {
+						return core.View{
+							TestID: "popup-settings-error", Role: core.RoleAlert,
+							Style: core.Style{Padding: core.Symmetric(8, 10), Gap: 8, BorderWidth: 1, CornerRadius: ui.RadiusControl},
+							StyleFunc: func() core.Style {
+								return core.Style{Background: ui.Alpha(colors.Danger(), 0.08), BorderColor: ui.Alpha(colors.Danger(), 0.25)}
+							},
+							Children: []core.Node{core.Text{ContentFunc: popupError.Get, Style: ui.TypeBody, StyleFunc: ui.Colored(colors.Danger)}},
+						}
+					},
+				},
+			}},
 			core.View{
 				Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 12, Padding: core.Symmetric(4, 0)},
 				Children: []core.Node{
 					ui.Switch{
-						TestID: "notifications-enabled", Label: "桌面通知", Checked: notifications.Get, OnChange: notifications.Set,
+						TestID: "notifications-enabled", Label: "消息弹窗", Checked: notifications.Get, OnChange: notifications.Set,
 					},
 					core.View{Style: core.Style{Gap: 4, FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0)}, Children: []core.Node{
-						core.Text{Content: "桌面通知", Style: ui.TypeLabel, StyleFunc: ui.Colored(colors.Text)},
-						core.Text{Content: "有新增或状态变化时提醒我", Style: ui.TypeCaption, StyleFunc: ui.Colored(colors.Muted)},
+						core.Text{Content: "消息弹窗", Style: ui.TypeLabel, StyleFunc: ui.Colored(colors.Text)},
+						core.Text{Content: "有新增或状态变化时在屏幕右下角提醒我", Style: ui.TypeCaption, StyleFunc: ui.Colored(colors.Muted)},
 					}},
 				},
 			},

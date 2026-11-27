@@ -24,11 +24,11 @@ func TestServiceAggregatesAllTaskAndBugPages(t *testing.T) {
 			t.Errorf("recPerPage = %q, want 100", got)
 		}
 		mu.Lock()
-		requests = append(requests, r.URL.Path+"?pageID="+pageID)
+		requests = append(requests, r.URL.RequestURI())
 		mu.Unlock()
 
-		switch r.URL.Path {
-		case "/biz/my-task-type=assignedTo.html":
+		switch {
+		case isServiceAssignedRequest(r, "task"):
 			firstPage := serviceTestItems(1, 100, "done")
 			firstPage[99] = serviceTestItem{ID: "100", Title: "第一页任务", Status: "wait"}
 			if pageID == "1" {
@@ -39,7 +39,7 @@ func TestServiceAggregatesAllTaskAndBugPages(t *testing.T) {
 				fmt.Fprint(w, serviceAssignedPage("task", 101, serviceTestItem{ID: "101", Title: "第二页任务", Status: "doing"}))
 				return
 			}
-		case "/biz/my-bug-type=assignedTo.html":
+		case isServiceAssignedRequest(r, "bug"):
 			firstPage := serviceTestItems(1, 100, "resolved")
 			firstPage[99] = serviceTestItem{ID: "100", Title: "第一页缺陷", Status: "active"}
 			if pageID == "1" {
@@ -75,10 +75,10 @@ func TestServiceAggregatesAllTaskAndBugPages(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	wantRequests := []string{
-		"/biz/my-task-type=assignedTo.html?pageID=1",
-		"/biz/my-task-type=assignedTo.html?pageID=2",
-		"/biz/my-bug-type=assignedTo.html?pageID=1",
-		"/biz/my-bug-type=assignedTo.html?pageID=2",
+		"/biz/index.php?m=my&f=task&browseType=assignedTo&param=0&orderBy=id_desc&recTotal=0&recPerPage=100&pageID=1",
+		"/biz/index.php?m=my&f=task&browseType=assignedTo&param=0&orderBy=id_desc&recTotal=0&recPerPage=100&pageID=2",
+		"/biz/index.php?m=my&f=bug&browseType=assignedTo&param=0&orderBy=id_desc&recTotal=0&recPerPage=100&pageID=1",
+		"/biz/index.php?m=my&f=bug&browseType=assignedTo&param=0&orderBy=id_desc&recTotal=0&recPerPage=100&pageID=2",
 	}
 	if !reflect.DeepEqual(requests, wantRequests) {
 		t.Fatalf("requests = %v, want %v", requests, wantRequests)
@@ -92,8 +92,8 @@ func TestServiceRejectsIncompletePageWithConstantRecTotal(t *testing.T) {
 		if got := r.URL.Query().Get("recPerPage"); got != "100" {
 			t.Errorf("recPerPage = %q, want 100", got)
 		}
-		switch r.URL.Path {
-		case "/biz/my-task-type=assignedTo.html":
+		switch {
+		case isServiceAssignedRequest(r, "task"):
 			switch r.URL.Query().Get("pageID") {
 			case "1":
 				fmt.Fprint(w, serviceAssignedPage("task", 2, serviceTestItem{ID: "101", Title: "第一页任务", Status: "wait"}))
@@ -102,7 +102,7 @@ func TestServiceRejectsIncompletePageWithConstantRecTotal(t *testing.T) {
 				fmt.Fprint(w, serviceAssignedPage("task", 2, serviceTestItem{ID: "102", Title: "第二页任务", Status: "doing"}))
 				return
 			}
-		case "/biz/my-bug-type=assignedTo.html":
+		case isServiceAssignedRequest(r, "bug"):
 			fmt.Fprint(w, serviceAssignedPage("bug", 0))
 			return
 		}
@@ -129,10 +129,10 @@ func TestServiceRejectsIncompletePageWithConstantRecTotal(t *testing.T) {
 
 func TestServiceDiscardsPartialSnapshotOnLaterFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/biz/my-task-type=assignedTo.html":
+		switch {
+		case isServiceAssignedRequest(r, "task"):
 			fmt.Fprint(w, serviceAssignedPage("task", 1, serviceTestItem{ID: "101", Title: "完整任务", Status: "wait"}))
-		case "/biz/my-bug-type=assignedTo.html":
+		case isServiceAssignedRequest(r, "bug"):
 			if r.URL.Query().Get("pageID") == "1" {
 				firstPage := serviceTestItems(1, 100, "resolved")
 				firstPage[99] = serviceTestItem{ID: "100", Title: "部分缺陷", Status: "active"}
@@ -164,12 +164,12 @@ func TestServiceStopsAfterMaximumPageCount(t *testing.T) {
 	var taskRequests atomic.Int32
 	var bugRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/biz/my-task-type=assignedTo.html" {
+		if isServiceAssignedRequest(r, "task") {
 			taskRequests.Add(1)
 			fmt.Fprint(w, serviceAssignedPage("task", maxServicePages*serviceRecPerPage+1, serviceTestItems(1, serviceRecPerPage, "wait")...))
 			return
 		}
-		if r.URL.Path == "/biz/my-bug-type=assignedTo.html" {
+		if isServiceAssignedRequest(r, "bug") {
 			bugRequests.Add(1)
 			fmt.Fprint(w, serviceAssignedPage("bug", 0))
 			return
@@ -201,12 +201,12 @@ func TestServiceStopsAfterMaximumPageCount(t *testing.T) {
 func TestServiceIgnoresIdenticalDuplicateItems(t *testing.T) {
 	item := serviceTestItem{ID: "101", Title: "重复出现的相同任务", Status: "wait"}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/biz/my-task-type=assignedTo.html":
+		switch {
+		case isServiceAssignedRequest(r, "task"):
 			firstPage := serviceTestItems(1, 100, "resolved")
 			firstPage[99] = item
 			fmt.Fprint(w, serviceAssignedPage("task", 101, firstPage...))
-		case "/biz/my-bug-type=assignedTo.html":
+		case isServiceAssignedRequest(r, "bug"):
 			fmt.Fprint(w, serviceAssignedPage("bug", 0))
 		default:
 			t.Errorf("unexpected request: %s", r.URL.String())
@@ -230,11 +230,11 @@ func TestServiceIgnoresIdenticalDuplicateItems(t *testing.T) {
 
 func TestServiceRejectsConflictingDuplicateItems(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/biz/my-bug-type=assignedTo.html" {
+		if isServiceAssignedRequest(r, "bug") {
 			fmt.Fprint(w, serviceAssignedPage("bug", 0))
 			return
 		}
-		if r.URL.Path != "/biz/my-task-type=assignedTo.html" {
+		if !isServiceAssignedRequest(r, "task") {
 			t.Errorf("unexpected request: %s", r.URL.String())
 			http.NotFound(w, r)
 			return
@@ -266,10 +266,10 @@ func TestServiceRejectsConflictingDuplicateItems(t *testing.T) {
 
 func TestServiceMapsSessionExpiryAndDiscardsTasks(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/biz/my-task-type=assignedTo.html":
+		switch {
+		case isServiceAssignedRequest(r, "task"):
 			fmt.Fprint(w, serviceAssignedPage("task", 1, serviceTestItem{ID: "101", Title: "已获取任务", Status: "wait"}))
-		case "/biz/my-bug-type=assignedTo.html":
+		case isServiceAssignedRequest(r, "bug"):
 			fmt.Fprint(w, `<html><form method="post"><input name="account"><input type="password" name="password"></form></html>`)
 		default:
 			t.Errorf("unexpected request: %s", r.URL.String())
@@ -289,6 +289,13 @@ func TestServiceMapsSessionExpiryAndDiscardsTasks(t *testing.T) {
 	if !errors.Is(err, application.ErrSessionExpired) {
 		t.Fatalf("error = %v, want application.ErrSessionExpired", err)
 	}
+}
+
+func isServiceAssignedRequest(r *http.Request, method string) bool {
+	return r.URL.Path == "/biz/index.php" &&
+		r.URL.Query().Get("m") == "my" &&
+		r.URL.Query().Get("f") == method &&
+		r.URL.Query().Get("browseType") == "assignedTo"
 }
 
 type serviceTestItem struct {

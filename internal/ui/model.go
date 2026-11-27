@@ -19,6 +19,7 @@ type WorkbenchData struct {
 	Changes              []domain.Change
 	PollSeconds          int
 	NotificationsEnabled bool
+	PopupSeconds         int
 }
 
 // WorkbenchProps connects the workbench to application and platform actions.
@@ -29,7 +30,7 @@ type WorkbenchProps struct {
 	OnRefresh   func()
 	OnOpenURL   func(string)
 	OnLogin     func(account, password string)
-	OnSettings  func(pollSeconds int, notificationsEnabled bool)
+	OnSettings  func(pollSeconds int, notificationsEnabled bool, popupSeconds int)
 }
 
 func (props WorkbenchProps) data() WorkbenchData {

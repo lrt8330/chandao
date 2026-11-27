@@ -84,6 +84,7 @@ func TestStateJSONContainsOnlySnapshotFields(t *testing.T) {
 		"items":                true,
 		"lastSuccess":          true,
 		"notificationsEnabled": true,
+		"popupSeconds":         true,
 		"pollSeconds":          true,
 		"initialized":          true,
 	}

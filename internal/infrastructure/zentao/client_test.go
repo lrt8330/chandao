@@ -56,6 +56,9 @@ func TestNewValidatesConfiguration(t *testing.T) {
 	if client.MaxResponseBytes != DefaultMaxResponseSize {
 		t.Errorf("MaxResponseBytes = %d, want %d", client.MaxResponseBytes, DefaultMaxResponseSize)
 	}
+	if client.RequestTimeout != defaultRequestTimeout {
+		t.Errorf("RequestTimeout = %v, want %v", client.RequestTimeout, defaultRequestTimeout)
+	}
 }
 
 func TestLoginSubmitsVerifiedProtocol(t *testing.T) {
@@ -66,20 +69,23 @@ func TestLoginSubmitsVerifiedProtocol(t *testing.T) {
 	var challengeRequests atomic.Int32
 	var loginRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/biz/user-refreshRandom.html":
+		switch {
+		case isRefreshRandomRequest(r):
 			challengeRequests.Add(1)
 			if r.Method != http.MethodGet {
 				t.Errorf("challenge method = %q, want GET", r.Method)
 			}
 			fmt.Fprint(w, " \n"+challenge+"\n ")
-		case "/biz/user-login.html":
+		case isLoginRequest(r):
 			loginRequests.Add(1)
 			if r.Method != http.MethodPost {
 				t.Errorf("login method = %q, want POST", r.Method)
 			}
 			if got := r.Header.Get("Content-Type"); got != "application/x-www-form-urlencoded" {
 				t.Errorf("Content-Type = %q, want form encoding", got)
+			}
+			if got, want := r.Header.Get("Referer"), "http://"+r.Host+"/biz/index.php?m=user&f=login"; got != want {
+				t.Errorf("Referer = %q, want %q", got, want)
 			}
 			if err := r.ParseForm(); err != nil {
 				t.Errorf("ParseForm: %v", err)
@@ -129,13 +135,13 @@ func TestLoginSubmitsVerifiedProtocol(t *testing.T) {
 func TestFetchAssignedURLsAndCookiePersistence(t *testing.T) {
 	tests := []struct {
 		name     string
-		path     string
+		method   string
 		response string
 		fetch    func(context.Context, *Client) ([]byte, error)
 	}{
 		{
 			name:     "assigned tasks",
-			path:     "/biz/my-task-type=assignedTo.html",
+			method:   "task",
 			response: "<html><body>assigned tasks</body></html>",
 			fetch: func(ctx context.Context, client *Client) ([]byte, error) {
 				return client.FetchAssignedTasks(ctx)
@@ -143,7 +149,7 @@ func TestFetchAssignedURLsAndCookiePersistence(t *testing.T) {
 		},
 		{
 			name:     "assigned bugs",
-			path:     "/biz/my-bug-type=assignedTo.html",
+			method:   "bug",
 			response: "<html><body>assigned bugs</body></html>",
 			fetch: func(ctx context.Context, client *Client) ([]byte, error) {
 				return client.FetchAssignedBugs(ctx)
@@ -154,13 +160,13 @@ func TestFetchAssignedURLsAndCookiePersistence(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var pageRequests atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch r.URL.Path {
-				case "/biz/user-refreshRandom.html":
+				switch {
+				case isRefreshRandomRequest(r):
 					fmt.Fprint(w, "654321")
-				case "/biz/user-login.html":
+				case isLoginRequest(r):
 					http.SetCookie(w, &http.Cookie{Name: "zentaosid", Value: "persisted-test-session", Path: "/biz/", HttpOnly: true})
 					writeJSON(t, w, map[string]string{"result": "success", "locate": "/biz/"})
-				case tt.path:
+				case isAssignedRequest(r, tt.method):
 					pageRequests.Add(1)
 					if r.Method != http.MethodGet {
 						t.Errorf("page method = %q, want GET", r.Method)
@@ -207,20 +213,20 @@ func TestFetchAssignedURLsAndCookiePersistence(t *testing.T) {
 
 func TestFetchAssignedPagesUsePaginationQuery(t *testing.T) {
 	tests := []struct {
-		name  string
-		path  string
-		fetch func(context.Context, *Client, int, int) ([]byte, error)
+		name   string
+		method string
+		fetch  func(context.Context, *Client, int, int) ([]byte, error)
 	}{
 		{
-			name: "tasks",
-			path: "/biz/my-task-type=assignedTo.html",
+			name:   "tasks",
+			method: "task",
 			fetch: func(ctx context.Context, client *Client, pageID, recPerPage int) ([]byte, error) {
 				return client.FetchAssignedTasksPage(ctx, pageID, recPerPage)
 			},
 		},
 		{
-			name: "bugs",
-			path: "/biz/my-bug-type=assignedTo.html",
+			name:   "bugs",
+			method: "bug",
 			fetch: func(ctx context.Context, client *Client, pageID, recPerPage int) ([]byte, error) {
 				return client.FetchAssignedBugsPage(ctx, pageID, recPerPage)
 			},
@@ -230,8 +236,8 @@ func TestFetchAssignedPagesUsePaginationQuery(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var requests atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != tt.path {
-					t.Errorf("path = %q, want %q", r.URL.Path, tt.path)
+				if !isAssignedRequest(r, tt.method) {
+					t.Errorf("unexpected assigned page request: %s", r.URL.RequestURI())
 				}
 				requests.Add(1)
 				if got := r.URL.Query().Get("pageID"); got != "3" {
@@ -293,8 +299,8 @@ func TestAssignedPageRejectsLoginContent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/biz/my-task-type=assignedTo.html" {
-					t.Errorf("path = %q, want assigned tasks", r.URL.Path)
+				if !isAssignedRequest(r, "task") {
+					t.Errorf("unexpected assigned page request: %s", r.URL.RequestURI())
 				}
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				fmt.Fprint(w, tt.body)
@@ -314,6 +320,25 @@ func TestAssignedPageRejectsLoginContent(t *testing.T) {
 			}
 		})
 	}
+}
+
+func isAssignedRequest(r *http.Request, method string) bool {
+	return r.URL.Path == "/biz/index.php" &&
+		r.URL.Query().Get("m") == "my" &&
+		r.URL.Query().Get("f") == method &&
+		r.URL.Query().Get("browseType") == "assignedTo"
+}
+
+func isLoginRequest(r *http.Request) bool {
+	return r.URL.Path == "/biz/index.php" &&
+		r.URL.Query().Get("m") == "user" &&
+		r.URL.Query().Get("f") == "login"
+}
+
+func isRefreshRandomRequest(r *http.Request) bool {
+	return r.URL.Path == "/biz/index.php" &&
+		r.URL.Query().Get("m") == "user" &&
+		r.URL.Query().Get("f") == "refreshRandom"
 }
 
 func md5Hex(value string) string {
@@ -339,13 +364,13 @@ func TestLoginRandomChallengeValidation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var loginRequests atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/biz/user-login.html" {
+				if isLoginRequest(r) {
 					loginRequests.Add(1)
 					writeJSON(t, w, map[string]string{"result": "success"})
 					return
 				}
-				if r.URL.Path != "/biz/user-refreshRandom.html" {
-					t.Errorf("unexpected path %q", r.URL.Path)
+				if !isRefreshRandomRequest(r) {
+					t.Errorf("unexpected request %s", r.URL.RequestURI())
 				}
 				w.WriteHeader(tt.status)
 				fmt.Fprint(w, tt.body)
@@ -390,10 +415,10 @@ func TestLoginPasswordHashCases(t *testing.T) {
 			trimmed := strings.TrimSpace(tt.password)
 			wantHash := md5Hex(md5Hex(trimmed) + challenge)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch r.URL.Path {
-				case "/biz/user-refreshRandom.html":
+				switch {
+				case isRefreshRandomRequest(r):
 					fmt.Fprint(w, challenge)
-				case "/biz/user-login.html":
+				case isLoginRequest(r):
 					if err := r.ParseForm(); err != nil {
 						t.Errorf("ParseForm: %v", err)
 					}
@@ -442,14 +467,14 @@ func TestLoginJSONResultHandling(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var unexpectedRequests atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch r.URL.Path {
-				case "/biz/user-refreshRandom.html":
+				switch {
+				case isRefreshRandomRequest(r):
 					fmt.Fprint(w, "123456")
-				case "/biz/user-login.html":
+				case isLoginRequest(r):
 					http.SetCookie(w, &http.Cookie{Name: "zentaosid", Value: "secret-cookie", Path: "/biz/", HttpOnly: true})
 					w.WriteHeader(tt.status)
 					fmt.Fprint(w, tt.body)
-				case "/biz/":
+				case r.URL.Path == "/biz/":
 					unexpectedRequests.Add(1)
 					fmt.Fprint(w, "dashboard")
 				default:
@@ -651,10 +676,43 @@ func TestClientCancellationDuringRequest(t *testing.T) {
 	}
 }
 
+func TestClientRequestTimeout(t *testing.T) {
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL+"/biz/", "test-user", "test-password")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	client.RequestTimeout = 25 * time.Millisecond
+	result := make(chan error, 1)
+	go func() {
+		_, err := client.FetchAssignedTasks(context.Background())
+		result <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("request did not start")
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("error = %v, want context.DeadlineExceeded", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("request did not stop after its timeout")
+	}
+}
+
 func TestRequestErrorOmitsSensitiveRedirectURL(t *testing.T) {
 	const token = "secret-token"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/biz/user-refreshRandom.html" {
+		if isRefreshRandomRequest(r) {
 			http.Redirect(w, r, "/failed?token="+token, http.StatusFound)
 			return
 		}

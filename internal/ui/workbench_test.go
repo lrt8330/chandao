@@ -626,8 +626,8 @@ func TestWorkbenchShowsHeaderAndKPIs(t *testing.T) {
 func TestWorkbenchSettingsOpensAndCloses(t *testing.T) {
 	var calls int
 	app := startWorkbench(t, WorkbenchProps{
-		Data:       WorkbenchData{Connected: true, PollSeconds: 60, NotificationsEnabled: true},
-		OnSettings: func(int, bool) { calls++ },
+		Data:       WorkbenchData{Connected: true, PollSeconds: 60, NotificationsEnabled: true, PopupSeconds: 8},
+		OnSettings: func(int, bool, int) { calls++ },
 	})
 
 	if app.Exists("id:settings-dialog") {
@@ -644,6 +644,9 @@ func TestWorkbenchSettingsOpensAndCloses(t *testing.T) {
 	}
 	if got := app.Find("id:poll-seconds").Text; got != "60" {
 		t.Fatalf("poll seconds = %q, want 60", got)
+	}
+	if got := app.Find("id:popup-seconds").Text; got != "8" {
+		t.Fatalf("popup seconds = %q, want 8", got)
 	}
 	if !app.Find("id:notifications-enabled").Props.Checked {
 		t.Fatal("notifications switch is not prefilled")
@@ -677,23 +680,27 @@ func TestWorkbenchSettingsSavesValidValues(t *testing.T) {
 		t.Run(strconv.Itoa(seconds), func(t *testing.T) {
 			var gotSeconds int
 			var gotNotifications bool
+			var gotPopupSeconds int
 			var calls int
 			app := startWorkbench(t, WorkbenchProps{
-				Data: WorkbenchData{Connected: true, PollSeconds: 60, NotificationsEnabled: true},
-				OnSettings: func(pollSeconds int, notificationsEnabled bool) {
+				Data: WorkbenchData{Connected: true, PollSeconds: 60, NotificationsEnabled: true, PopupSeconds: 8},
+				OnSettings: func(pollSeconds int, notificationsEnabled bool, popupSeconds int) {
 					calls++
 					gotSeconds = pollSeconds
 					gotNotifications = notificationsEnabled
+					gotPopupSeconds = popupSeconds
 				},
 			})
 			app.Press("id:open-settings")
 			app.Clear("id:poll-seconds")
 			app.Type("id:poll-seconds", strconv.Itoa(seconds))
+			app.Clear("id:popup-seconds")
+			app.Type("id:popup-seconds", "12")
 			app.Press("id:notifications-enabled")
 			app.Press("id:save-settings")
 			app.WaitForGone("id:settings-dialog", time.Second)
-			if calls != 1 || gotSeconds != seconds || gotNotifications {
-				t.Fatalf("settings callback calls/values = %d/%d/%t, want 1/%d/false", calls, gotSeconds, gotNotifications, seconds)
+			if calls != 1 || gotSeconds != seconds || gotNotifications || gotPopupSeconds != 12 {
+				t.Fatalf("settings callback calls/values = %d/%d/%t/%d, want 1/%d/false/12", calls, gotSeconds, gotNotifications, gotPopupSeconds, seconds)
 			}
 		})
 	}
@@ -704,8 +711,8 @@ func TestWorkbenchSettingsRejectsInvalidPollValues(t *testing.T) {
 		t.Run("poll_"+value, func(t *testing.T) {
 			var calls int
 			app := startWorkbench(t, WorkbenchProps{
-				Data:       WorkbenchData{Connected: true, PollSeconds: 60, NotificationsEnabled: true},
-				OnSettings: func(int, bool) { calls++ },
+				Data:       WorkbenchData{Connected: true, PollSeconds: 60, NotificationsEnabled: true, PopupSeconds: 8},
+				OnSettings: func(int, bool, int) { calls++ },
 			})
 			app.Press("id:open-settings")
 			app.Clear("id:poll-seconds")
@@ -742,6 +749,35 @@ func TestWorkbenchSettingsRejectsInvalidPollValues(t *testing.T) {
 	}
 }
 
+func TestWorkbenchSettingsRejectsInvalidPopupValues(t *testing.T) {
+	for _, value := range []string{"-1", "61", "abc", "1.5", ""} {
+		t.Run("popup_"+value, func(t *testing.T) {
+			var calls int
+			app := startWorkbench(t, WorkbenchProps{
+				Data:       WorkbenchData{Connected: true, PollSeconds: 60, NotificationsEnabled: true, PopupSeconds: 8},
+				OnSettings: func(int, bool, int) { calls++ },
+			})
+			app.Press("id:open-settings")
+			app.Clear("id:popup-seconds")
+			if value != "" {
+				app.Type("id:popup-seconds", value)
+			}
+			app.Press("id:save-settings")
+			if calls != 0 {
+				t.Fatal("invalid popup duration called OnSettings")
+			}
+			if !app.Exists("id:settings-dialog") {
+				t.Fatal("settings closed after invalid popup duration")
+			}
+			if !app.Find("id:popup-seconds").Props.Invalid {
+				t.Fatal("popup duration input is not marked invalid")
+			}
+			app.Find("id:popup-settings-error")
+			app.Find("text:" + popupErrorText)
+		})
+	}
+}
+
 func TestWorkbenchSettingsNotificationsToggle(t *testing.T) {
 	for _, initial := range []bool{false, true} {
 		t.Run(strconv.FormatBool(initial), func(t *testing.T) {
@@ -774,7 +810,7 @@ func TestWorkbenchSettingsFitNarrowScreen(t *testing.T) {
 	if got := app.Find("id:settings-dialog").Frame.Size.Width; got > 390 {
 		t.Fatalf("narrow settings dialog width = %v, exceeds the window", got)
 	}
-	for _, id := range []string{"poll-seconds", "notifications-enabled", "cancel-settings", "save-settings"} {
+	for _, id := range []string{"poll-seconds", "popup-seconds", "notifications-enabled", "cancel-settings", "save-settings"} {
 		control := app.Find("id:" + id)
 		bounds := control.Bounds()
 		if bounds.Origin.X+core.Points(control.Frame.Size.Width) > 390 {

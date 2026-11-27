@@ -9,6 +9,7 @@
 # Credentials and local environment files
 .env
 .env.*
+!.env.example
 *.pem
 *.key
 *.p12
@@ -26,6 +27,10 @@ cookies.txt
 *.o
 *.test
 *.zip
+
+# Go test artifacts
+coverage.out
+*.prof
 
 # OS and editor cruft
 Thumbs.db

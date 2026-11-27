@@ -53,11 +53,21 @@ NSGo 原生 UI + Go `net/http` Cookie 会话 + 禅道同源页面数据解析。
 
 ## 架构
 
-- `zentao` 包：账号登录、Cookie 会话、页面请求、任务/Bug 解析、事项标准化。
-- `app` 包：应用状态、基线管理、轮询调度、变化检测、通知和跳转。
-- NSGo 组件：主工作台、设置、事项详情、托盘菜单。
-- 本地安全存储：Windows 凭据管理器，由 NSGo `cx.Secrets()` 提供。
-- 本地状态文件：保存已见事项 ID、状态指纹、最后成功刷新时间和通知偏好；不保存明文密码。
+项目采用“三层架构 + 基础设施辅助 + 其它”的分层设计，依赖方向由外向内，领域层不依赖 NSGo、HTTP 或具体存储。
+
+- **表现层 `internal/ui`**：NSGo 主工作台、设置、事项详情、筛选和视图状态；只调用应用层接口，不直接抓取网页。
+- **应用层 `internal/application`**：轮询调度、会话恢复、变化协调、通知触发、本地状态管理和用例编排。
+- **领域层 `internal/domain`**：任务/Bug 模型、稳定指纹、首次基线、新增与状态变化规则；纯 Go，可独立测试。
+- **基础设施辅助层 `internal/infrastructure`**：禅道只读 HTTP 客户端与页面解析、Windows 凭据管理器封装、本地 JSON 状态仓库、系统通知适配。
+- **组合根 `app.go`**：创建各层依赖、组装 NSGo 组件、托盘和窗口生命周期。
+- **其它**：`assets` 图标资源、`testdata` 脱敏夹具、自动化测试、设计/实施/验证文档和构建产物。
+
+核心依赖规则：
+
+- `internal/ui` 依赖 `internal/application` 暴露的用例和视图模型。
+- `internal/application` 依赖 `internal/domain`，通过接口使用基础设施。
+- `internal/infrastructure` 实现应用层定义的端口接口。
+- `internal/domain` 不导入任何其它项目包。
 
 ## 数据模型
 

@@ -4,7 +4,7 @@
 
 **目标：** 构建一个 NSGo 原生 Windows 托盘程序，读取当前用户指派给本人的禅道任务和 Bug，提供主工作台、新增/状态变化通知以及禅道详情跳转。
 
-**架构：** `internal/zentao` 负责只读 HTTP 会话和页面解析；`internal/app` 负责基线、轮询、变化检测和本地状态；NSGo `Root` 组件负责主工作台、设置、详情和托盘。密码通过 NSGo `cx.Secrets()` 保存到 Windows 凭据管理器，业务状态保存为不含敏感信息的 JSON。
+**架构：** 采用“三层架构 + 基础设施辅助 + 其它”。`internal/domain` 保存任务/Bug 模型和变化规则；`internal/application` 编排轮询、基线、状态和通知；`internal/ui` 实现 NSGo 主工作台与详情；`internal/infrastructure` 提供禅道只读 HTTP、页面解析、Windows 凭据管理器、本地状态仓库和系统通知适配。`app.go` 是组合根，负责依赖组装、托盘和窗口生命周期。密码通过 NSGo `cx.Secrets()` 保存到 Windows 凭据管理器，业务状态保存为不含敏感信息的 JSON。
 
 **技术栈：** Go 1.27.3+、NSGo、`net/http`、`golang.org/x/net/html`、NSGo signals/components、Windows Credential Manager、NSGo 系统通知与托盘 API。
 
@@ -31,13 +31,13 @@
 ## Task 1: 领域模型与变化检测（TDD）
 
 **文件：**
-- 创建：`internal/app/model.go`
-- 创建：`internal/app/changes.go`
-- 创建：`internal/app/changes_test.go`
+- 创建：`internal/domain/item.go`
+- 创建：`internal/domain/changes.go`
+- 创建：`internal/domain/changes_test.go`
 
 **步骤：**
 1. 写失败测试，定义 `ItemType`、`Item`、`Change`、`ChangeKind`。
-2. 运行 `go test ./internal/app`，确认因类型未定义失败。
+2. 运行 `go test ./internal/domain`，确认因类型未定义失败。
 3. 实现最小模型：
 
 ```go
@@ -81,54 +81,58 @@ type Change struct {
    - 当前项不存在于 previous：`ChangeNew`。
    - 已存在但 `Status` 不同：`ChangeStatus`。
    - 其他情况不产生变化。
-6. 运行 `go test ./internal/app`，全部通过。
+6. 运行 `go test ./internal/domain`，全部通过。
 
 **检查点：** 基线、新增、状态变化和失败重试不会误报。
 
 ## Task 2: 禅道登录与真实页面取证
 
 **文件：**
-- 创建：`internal/zentao/client.go`
-- 创建：`internal/zentao/login_test.go`
+- 创建：`internal/infrastructure/zentao/client.go`
+- 创建：`internal/infrastructure/zentao/login_test.go`
+- 创建：`internal/application/ports.go`
 - 创建：`testdata/login.html`
-- 创建：`testdata/my.html`
+- 创建：`testdata/assigned_tasks.html`
+- 创建：`testdata/assigned_bugs.html`
 
 **步骤：**
 1. 使用浏览器从禅道登录入口真实登录，打开开发者工具 Network。
 2. 记录登录请求 URL、方法、表单字段、密码是否前端哈希、重定向链和会话 Cookie 名称。
-3. 打开 `/biz/my`，记录任务与 Bug 区块的真实 HTML 结构、详情 URL 格式和状态文本。
+3. 打开 `/biz/my-task-type=assignedTo.html` 与 `/biz/my-bug-type=assignedTo.html`，记录“指派给我”列表的真实 HTML 结构、详情 URL 格式和状态文本；`/biz/my` 仅作为仪表盘入口，不作为解析源。
 4. 将脱敏后的登录页与“我的”页保存为 `testdata`，不包含 Cookie、密码或真实敏感业务内容。
 5. 写失败测试，验证登录页可提取 `account`、`password`、`referer` 及实际存在的隐藏字段。
-6. 实现 `Client`：`BaseURL`、`Account`、`Password`、`http.Client`、`Jar`、`Login(ctx)`、`FetchMy(ctx)`。
+6. 实现 `Client`：`BaseURL`、`Account`、`Password`、`http.Client`、`Jar`、`Login(ctx)`、`FetchAssignedTasks(ctx)`、`FetchAssignedBugs(ctx)`；登录使用 `verifyRand` 与 `md5(md5(password)+verifyRand)`。
 7. 登录请求只使用 GET/POST 读取流程，不调用任何写接口。
 8. 使用提供账号做一次最小真实验证：确认登录成功且能读取“我的”页；验证后不输出 Cookie 或密码。
 
-**检查点：** 自动登录成功，`FetchMy` 返回登录后页面而非登录页。
+**检查点：** 自动登录成功，两个“指派给我”列表均返回登录后页面而非登录页。
 
 ## Task 3: 任务与 Bug 页面解析（TDD）
 
 **文件：**
-- 创建：`internal/zentao/parse.go`
-- 创建：`internal/zentao/parse_test.go`
+- 创建：`internal/infrastructure/zentao/parse.go`
+- 创建：`internal/infrastructure/zentao/parse_test.go`
 
 **步骤：**
-1. 写失败测试，输入脱敏 `testdata/my.html`，断言能解析任务与 Bug。
-2. 运行 `go test ./internal/zentao`，确认失败。
+1. 写失败测试，输入脱敏 `testdata/assigned_tasks.html` 与 `testdata/assigned_bugs.html`，断言能解析任务与 Bug。
+2. 运行 `go test ./internal/infrastructure/zentao`，确认失败。
 3. 使用 `golang.org/x/net/html` 实现语义解析，不依赖脆弱的全文正则。
 4. 每个事项提取：类型、ID、标题、项目、状态、更新时间、详情 URL。
 5. 仅保留指派给当前账号且未完成/未解决的事项。
 6. 详情 URL 使用禅道页面中的真实链接，并限制为配置的禅道 Origin。
 7. 增加登录失效页、空列表、重复 ID、缺失字段测试。
-8. 运行 `go test ./internal/zentao`，全部通过。
+8. 运行 `go test ./internal/infrastructure/zentao`，全部通过。
 
 **检查点：** 解析结果与浏览器“我的”页逐项一致。
 
 ## Task 4: 本地状态与安全账号存储
 
 **文件：**
-- 创建：`internal/app/store.go`
-- 创建：`internal/app/store_test.go`
-- 创建：`internal/app/settings.go`
+- 创建：`internal/application/state.go`
+- 创建：`internal/application/state_test.go`
+- 创建：`internal/infrastructure/storage/state_repo.go`
+- 创建：`internal/infrastructure/storage/state_repo_test.go`
+- 创建：`internal/infrastructure/security/credentials.go`
 
 **步骤：**
 1. 写失败测试，覆盖状态文件保存/加载、损坏文件回退、空基线。
@@ -143,8 +147,9 @@ type Change struct {
 ## Task 5: 轮询、会话恢复与通知协调
 
 **文件：**
-- 创建：`internal/app/controller.go`
-- 创建：`internal/app/controller_test.go`
+- 创建：`internal/application/controller.go`
+- 创建：`internal/application/controller_test.go`
+- 创建：`internal/infrastructure/notification/windows.go`
 
 **步骤：**
 1. 写失败测试，使用假 `ZentaoClient` 接口模拟成功、登录失效、网络失败和解析失败。
@@ -154,21 +159,21 @@ type Change struct {
 5. 请求失败或解析失败不调用 `DetectChanges`，不发送通知。
 6. 使用 `time.Ticker` 轮询；手动刷新与自动刷新串行，避免并发覆盖。
 7. 通知事件包含 `Change` 和事项 Key，供 UI 定位。
-8. 运行 `go test ./internal/app`，全部通过。
+8. 运行 `go test ./internal/domain`，全部通过。
 
 **检查点：** 连续刷新不重复通知；失败轮询不产生假变化。
 
 ## Task 6: 主工作台 UI
 
 **文件：**
-- 创建：`ui/theme.go`
-- 创建：`ui/workbench.go`
-- 创建：`ui/item_detail.go`
-- 创建：`ui/settings.go`
-- 创建：`ui/workbench_test.go`
+- 创建：`internal/ui/theme.go`
+- 创建：`internal/ui/workbench.go`
+- 创建：`internal/ui/item_detail.go`
+- 创建：`internal/ui/settings.go`
+- 创建：`internal/ui/workbench_test.go`
 
 **步骤：**
-1. 在 `ui/theme.go` 定义设计文档中的云白/钴蓝颜色、圆角、间距和字体层级。
+1. 在 `internal/ui/theme.go` 定义设计文档中的云白/钴蓝颜色、圆角、间距和字体层级。
 2. 写失败 UI 测试：工作台显示“未完成任务”“未解决 Bug”“本轮新增”“本轮状态变化”。
 3. 实现顶部栏：应用名称、账号、连接状态、最后刷新时间、立即刷新按钮。
 4. 实现汇总卡片和筛选：全部、任务、Bug、仅看本轮变化。
@@ -183,9 +188,9 @@ type Change struct {
 
 **文件：**
 - 修改：`app.go`
-- 创建：`desktop/tray.go`
-- 创建：`desktop/notifications.go`
-- 创建：`desktop/tray_test.go`
+- 创建：`internal/ui/tray.go`
+- 创建：`internal/infrastructure/notification/windows.go`
+- 创建：`internal/ui/tray_test.go`
 
 **步骤：**
 1. 写失败测试，验证托盘菜单包含“打开工作台”“立即刷新”“通知开关”“退出”。
@@ -203,7 +208,7 @@ type Change struct {
 ## Task 8: 真实账号联调与页面一致性
 
 **文件：**
-- 修改：发现解析偏差的 `internal/zentao/*.go`
+- 修改：发现解析偏差的 `internal/infrastructure/zentao/*.go`
 - 创建：`docs/verification/2026-11-27-real-account.md`
 
 **步骤：**
@@ -235,6 +240,20 @@ type Change struct {
 8. 记录可执行文件、安装包、SHA-256、测试结果和已知限制。
 
 **检查点：** 交付目录存在且每个文件体积稳定、校验和匹配、程序可启动。
+
+## 真实验收硬门禁
+
+以下项目全部通过后，任务才可标记完成；自动化测试不能替代真实验收：
+
+1. 使用真实账号登录，确认两个“指派给我”列表返回登录后内容。
+2. 工作台任务数、Bug 数与禅道页面人工计数逐项对账，差异必须为 0。
+3. 首次启动不补弹历史通知；使用真实数据的内存副本触发一次受控新增和状态变化，验证 Windows 右下角系统通知，不修改禅道生产数据。
+4. 点击通知后工作台恢复前台并选中正确事项。
+5. 点击“在禅道打开”后默认浏览器打开真实详情 URL。
+6. 关闭工作台后托盘仍存在；托盘手动刷新、通知开关和退出均可用。
+7. 退出并重启后，基线、设置和已见状态不丢失，不重复弹历史通知。
+8. 检查应用日志、状态文件、Git 提交和截图中不含密码、Cookie 或令牌。
+9. 保存真机截图和命令输出到 `docs/verification/`，截图需裁掉或隐藏敏感业务内容。
 
 ## 完成标准
 

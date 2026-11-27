@@ -177,11 +177,6 @@ func messagePopupView(cx *core.Scope, manager *MessagePopupManager, popup *messa
 	if change.Kind == domain.ChangeStatus {
 		description += fmt.Sprintf("\n状态变化：%s → %s", change.Old, change.New)
 	}
-	variant := ui.BadgeAccent
-	if change.Item.Type == domain.ItemBug {
-		variant = ui.BadgeDanger
-	}
-	glass := ui.FinOf(cx).Glass()
 	return core.View{
 		TestID: "message-popup-" + change.Item.Key(), Role: core.RoleButton,
 		Label: title + ". " + description,
@@ -189,19 +184,36 @@ func messagePopupView(cx *core.Scope, manager *MessagePopupManager, popup *messa
 			FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0), MinHeight: core.Pt(0),
 			Direction: core.Row, AlignItems: core.AlignStart, Gap: 12, Padding: core.All(14),
 			Background: colors.Surface(), BorderWidth: 1, BorderColor: colors.Border(),
-			CornerRadius: ui.RadiusCard, BorderCurve: core.BorderCurveContinuous,
-			Shadows: glass.Shadows, BackdropFilters: glass.Backdrop,
+			CornerRadius: 8, BorderCurve: core.BorderCurveContinuous,
+			Shadows: []core.BoxShadow{ui.Shadow(0, 8, 24, 0, core.RGBA(cloudInk, 0.16))},
 		},
 		OnPress:      func(core.PressEvent) { manager.press(popup, change.Item.Key()) },
 		OnMouseEnter: func(core.MouseEvent) { manager.hover(popup, true) },
 		OnMouseLeave: func(core.MouseEvent) { manager.hover(popup, false) },
 		Children: []core.Node{
-			ui.Badge{Text: itemTypeLabel(change.Item.Type), Variant: variant},
+			popupChip(cx, change.Item.Type),
 			core.View{Style: core.Style{Gap: 4, FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0)}, Children: []core.Node{
 				core.Text{Content: title, Style: ui.TypeLabel, StyleFunc: ui.Colored(colors.Text)},
 				core.Text{Content: description, MaxLines: 3, Style: ui.TypeCaption, StyleFunc: ui.Colored(colors.Muted)},
 			}},
 			ui.IconButton{Icon: lucide.X, Label: "关闭消息", Size: 24, TestID: "close-" + change.Item.Key(), OnPress: func() { manager.close(popup) }},
 		},
+	}
+}
+
+// popupChip 用语义图标代替文字徽章：任务走琥珀座，Bug 维持红色语义，
+// 夜色下换浅琥珀墨色保持对比。
+func popupChip(cx *core.Scope, itemType domain.ItemType) core.Node {
+	accent, line, ink, svg := core.RGB(cobaltSoft), core.RGB(cobaltChipLine), core.RGB(cobaltDark), lucide.ListTodo()
+	if itemType == domain.ItemBug {
+		accent, line, ink, svg = core.RGB(bugSoftFill), core.RGB(bugSoftLine), core.RGB(cloudDanger), lucide.Bug()
+	}
+	return core.View{
+		Style:     core.Style{Width: core.Pt(28), Height: core.Pt(28), CornerRadius: 7, AlignItems: core.AlignCenter, JustifyContent: core.JustifyCenter, FlexShrink: 0, BorderWidth: 1},
+		StyleFunc: func() core.Style { return core.Style{Background: accent, BorderColor: line} },
+		Children: []core.Node{core.Icon{
+			SVG: svg, Label: "",
+			Style: core.Style{FontSize: 16}, StyleFunc: func() core.Style { return core.Style{Color: ink} },
+		}},
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"chandao/zentaotray/internal/domain"
 	"github.com/nsgo-dev/nsgo/base"
 	"github.com/nsgo-dev/nsgo/core"
+	"github.com/nsgo-dev/nsgo/icons/lucide"
 	"github.com/nsgo-dev/nsgo/ui"
 )
 
@@ -16,14 +17,13 @@ func itemDetailPane(cx *core.Scope, item func() domain.Item, onOpenURL func(stri
 			Padding: core.All(20), Gap: 16,
 		},
 		StyleFunc: func() core.Style {
-			return ui.FinOf(cx).Card().Over(core.Style{
-				Background: colors.Surface(), Color: colors.Text(), BorderWidth: 1,
-				BorderColor: colors.Border(), CornerRadius: ui.RadiusCard,
-			})
+			style := paperSurface(cx)
+			style.Color = colors.Text()
+			return style
 		},
 		Children: []core.Node{
 			core.View{Style: core.Style{Gap: 8}, Children: []core.Node{
-				ui.Badge{TextFunc: func() string { return itemTypeLabel(item().Type) }},
+				typePill(cx, item().Type),
 				core.Text{ContentFunc: func() string { return itemDetailTitle(item()) }, Role: core.RoleHeader, Style: ui.TypeHeading},
 				core.Text{ContentFunc: func() string { return item().Key() }, Style: ui.TypeCaption, StyleFunc: ui.Colored(colors.Muted)},
 			}},
@@ -51,16 +51,19 @@ func itemDetailDialog(cx *core.Scope, item func() domain.Item, onOpenURL func(st
 			}
 		},
 		TitleFunc: func() string { return itemDetailTitle(item()) },
+		Style:     dialogChrome(cx),
 		Children:  []core.Node{itemDetailBody(cx, item)},
 		Footer: []core.Node{
-			ui.Button{Text: "关闭", TestID: "close-item-detail", Variant: ui.ButtonSecondary, OnPress: close},
+			ui.Button{Text: "关闭", TestID: "close-item-detail", Variant: ui.ButtonOutline, OnPress: close},
 			openZentaoButton(item, onOpenURL),
 		},
 	}
 }
 
+// itemDetailBody 按列表组排布字段，字段之间用 hairline 分隔。
 func itemDetailBody(cx *core.Scope, item func() domain.Item) core.Node {
-	return core.View{Style: core.Style{Gap: 12}, Children: []core.Node{
+	colors := ui.ColorsOf(cx)
+	fields := []core.Node{
 		detailField(cx, "类型", func() string { return itemTypeLabel(item().Type) }, "detail-type"),
 		detailField(cx, "编号", func() string { return item().ID }, "detail-id"),
 		detailField(cx, "标题", func() string { return item().Title }, "detail-title"),
@@ -69,7 +72,17 @@ func itemDetailBody(cx *core.Scope, item func() domain.Item) core.Node {
 		detailField(cx, "更新时间", func() string { return formatUpdatedAt(item().UpdatedAt) }, "detail-updated"),
 		detailField(cx, "链接", func() string { return item().URL }, "detail-url"),
 		detailField(cx, "标识", func() string { return item().Key() }, "detail-key"),
-	}}
+	}
+	children := make([]core.Node, 0, len(fields)*2-1)
+	for index, field := range fields {
+		if index > 0 {
+			children = append(children, core.View{Style: core.Style{Height: core.Pt(1)}, StyleFunc: func() core.Style {
+				return core.Style{Background: colors.Border()}
+			}})
+		}
+		children = append(children, field)
+	}
+	return core.View{Style: core.Style{Gap: 10}, Children: children}
 }
 
 func detailField(cx *core.Scope, label string, value func() string, testID string) core.Node {
@@ -87,7 +100,11 @@ func detailField(cx *core.Scope, label string, value func() string, testID strin
 func openZentaoButton(item func() domain.Item, onOpenURL func(string)) core.Node {
 	return ui.Button{
 		Text: "在禅道打开", TestID: "open-zentao", Size: ui.SizeLarge,
-		Disabled: func() bool { return item().URL == "" || onOpenURL == nil },
+		Icon:      lucide.ExternalLink,
+		Color:     ui.Fixed(core.RGB(cobalt)),
+		TextStyle: core.Style{Color: core.RGB(0xFFFFFF)},
+		Tint:      ui.Fixed(core.RGB(0xFFFFFF)),
+		Disabled:  func() bool { return item().URL == "" || onOpenURL == nil },
 		OnPress: func() {
 			if onOpenURL != nil && item().URL != "" {
 				onOpenURL(item().URL)

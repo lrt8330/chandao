@@ -17,13 +17,6 @@ const (
 	popupErrorText  = "消息弹窗保留时间必须是 0 到 60 之间的整数"
 )
 
-func settingsButton(open *core.Signal[bool]) core.Node {
-	return ui.Button{
-		Text: "设置", TestID: "open-settings", Variant: ui.ButtonOutline,
-		OnPress: func() { open.Set(true) },
-	}
-}
-
 func settingsDialog(cx *core.Scope, props WorkbenchProps, open *core.Signal[bool]) core.Node {
 	colors := ui.ColorsOf(cx)
 	pollText := core.NewSignal(cx, strconv.Itoa(props.data().PollSeconds))
@@ -76,9 +69,9 @@ func settingsDialog(cx *core.Scope, props WorkbenchProps, open *core.Signal[bool
 				close()
 			}
 		},
-		Style: core.Style{Background: colors.Surface(), BorderColor: colors.Border()},
+		Style: dialogChrome(cx),
 		Children: []core.Node{
-			core.View{Style: core.Style{Gap: 8}, Children: []core.Node{
+			settingsGroup(cx, []core.Node{
 				core.Text{Content: "轮询间隔（秒）", Style: ui.TypeLabel, StyleFunc: ui.Colored(colors.Text)},
 				ui.Input{
 					TestID: "poll-seconds", Label: "轮询间隔（秒）", Placeholder: "30–300",
@@ -96,18 +89,11 @@ func settingsDialog(cx *core.Scope, props WorkbenchProps, open *core.Signal[bool
 				core.Show{
 					When: func() bool { return validationError.Get() != "" },
 					Then: func(cx *core.Scope) core.Node {
-						return core.View{
-							TestID: "settings-error", Role: core.RoleAlert,
-							Style: core.Style{Padding: core.Symmetric(8, 10), Gap: 8, BorderWidth: 1, CornerRadius: ui.RadiusControl},
-							StyleFunc: func() core.Style {
-								return core.Style{Background: ui.Alpha(colors.Danger(), 0.08), BorderColor: ui.Alpha(colors.Danger(), 0.25)}
-							},
-							Children: []core.Node{core.Text{ContentFunc: validationError.Get, Style: ui.TypeBody, StyleFunc: ui.Colored(colors.Danger)}},
-						}
+						return settingsError(cx, validationError.Get, "settings-error")
 					},
 				},
-			}},
-			core.View{Style: core.Style{Gap: 8}, Children: []core.Node{
+			}),
+			settingsGroup(cx, []core.Node{
 				core.Text{Content: "消息弹窗保留时间（秒）", Style: ui.TypeLabel, StyleFunc: ui.Colored(colors.Text)},
 				ui.Input{
 					TestID: "popup-seconds", Label: "消息弹窗保留时间（秒）", Placeholder: "0–60",
@@ -125,33 +111,58 @@ func settingsDialog(cx *core.Scope, props WorkbenchProps, open *core.Signal[bool
 				core.Show{
 					When: func() bool { return popupError.Get() != "" },
 					Then: func(cx *core.Scope) core.Node {
-						return core.View{
-							TestID: "popup-settings-error", Role: core.RoleAlert,
-							Style: core.Style{Padding: core.Symmetric(8, 10), Gap: 8, BorderWidth: 1, CornerRadius: ui.RadiusControl},
-							StyleFunc: func() core.Style {
-								return core.Style{Background: ui.Alpha(colors.Danger(), 0.08), BorderColor: ui.Alpha(colors.Danger(), 0.25)}
-							},
-							Children: []core.Node{core.Text{ContentFunc: popupError.Get, Style: ui.TypeBody, StyleFunc: ui.Colored(colors.Danger)}},
-						}
+						return settingsError(cx, popupError.Get, "popup-settings-error")
 					},
 				},
-			}},
-			core.View{
-				Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 12, Padding: core.Symmetric(4, 0)},
-				Children: []core.Node{
-					ui.Switch{
-						TestID: "notifications-enabled", Label: "消息弹窗", Checked: notifications.Get, OnChange: notifications.Set,
+			}),
+			settingsGroup(cx, []core.Node{
+				core.View{
+					Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 12},
+					Children: []core.Node{
+						ui.Switch{
+							TestID: "notifications-enabled", Label: "消息弹窗", Checked: notifications.Get, OnChange: notifications.Set,
+						},
+						core.View{Style: core.Style{Gap: 4, FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0)}, Children: []core.Node{
+							core.Text{Content: "消息弹窗", Style: ui.TypeLabel, StyleFunc: ui.Colored(colors.Text)},
+							core.Text{Content: "有新增或状态变化时在屏幕右下角提醒我", Style: ui.TypeCaption, StyleFunc: ui.Colored(colors.Muted)},
+						}},
 					},
-					core.View{Style: core.Style{Gap: 4, FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0)}, Children: []core.Node{
-						core.Text{Content: "消息弹窗", Style: ui.TypeLabel, StyleFunc: ui.Colored(colors.Text)},
-						core.Text{Content: "有新增或状态变化时在屏幕右下角提醒我", Style: ui.TypeCaption, StyleFunc: ui.Colored(colors.Muted)},
-					}},
 				},
-			},
+			}),
 		},
 		Footer: []core.Node{
-			ui.Button{Text: "取消", TestID: "cancel-settings", Variant: ui.ButtonSecondary, OnPress: close},
-			ui.Button{Text: "保存", TestID: "save-settings", OnPress: save},
+			ui.Button{Text: "取消", TestID: "cancel-settings", Variant: ui.ButtonOutline, OnPress: close},
+			ui.Button{
+				Text: "保存", TestID: "save-settings",
+				Color:     ui.Fixed(core.RGB(cobalt)),
+				TextStyle: core.Style{Color: core.RGB(0xFFFFFF)},
+				OnPress:   save,
+			},
 		},
+	}
+}
+
+// settingsGroup 是对话框里的浅底列表组：字段、辅文和错误按 iOS 设置的
+// 分组排布，组间用间距分隔，不再给每组画卡片边框。
+func settingsGroup(cx *core.Scope, children []core.Node) core.Node {
+	colors := ui.ColorsOf(cx)
+	return core.View{
+		Style: core.Style{Gap: 8, Padding: core.All(12)},
+		StyleFunc: func() core.Style {
+			return core.Style{Background: colors.Inset(), CornerRadius: 12, BorderCurve: core.BorderCurveContinuous}
+		},
+		Children: children,
+	}
+}
+
+func settingsError(cx *core.Scope, message func() string, testID string) core.Node {
+	colors := ui.ColorsOf(cx)
+	return core.View{
+		TestID: testID, Role: core.RoleAlert,
+		Style: core.Style{Padding: core.Symmetric(8, 10), Gap: 8, CornerRadius: ui.RadiusControl},
+		StyleFunc: func() core.Style {
+			return core.Style{Background: ui.Alpha(colors.Danger(), 0.08), BorderColor: ui.Alpha(colors.Danger(), 0.25)}
+		},
+		Children: []core.Node{core.Text{ContentFunc: message, Style: ui.TypeBody, StyleFunc: ui.Colored(colors.Danger)}},
 	}
 }

@@ -326,7 +326,7 @@ func TestWorkbenchDataFuncUpdatesWithoutResettingFilters(t *testing.T) {
 		}}
 	}, workbenchTestOptions()...)
 
-	app.Find("text:账号：initial.account")
+	app.Find("text:initial.account")
 	app.Find("label:修复登录页")
 	app.Press("id:filter-bug")
 	app.Find("label:登录后白屏")
@@ -372,9 +372,9 @@ func TestWorkbenchDataFuncUpdatesWithoutResettingFilters(t *testing.T) {
 			t.Errorf("%s after refresh = %q, want %q", id, got, want)
 		}
 	}
-	app.Find("text:账号：refreshed.account")
+	app.Find("text:refreshed.account")
 	app.Find("text:未连接")
-	app.Find("text:上次刷新：2026-11-27 19:30")
+	app.Find("text:上次刷新 2026-11-27 19:30")
 	app.Find("id:loading-state")
 	app.Find("text:刷新完成，请检查连接")
 	if refresh := app.Find("id:refresh"); !refresh.Props.Disabled || !refresh.Props.Busy {
@@ -588,25 +588,22 @@ func TestWorkbenchShowsHeaderAndKPIs(t *testing.T) {
 		},
 	}, OnRefresh: func() { refreshed = true }})
 
-	if got := app.Find("id:workbench").Style.Background; got != core.RGB(0xF5F8FC) {
-		t.Errorf("workbench background = %x, want F5F8FC", got)
+	if got := app.Find("id:workbench").Style.Background; got != core.RGB(0xF5F7FA) {
+		t.Errorf("workbench background = %x, want F5F7FA", got)
 	}
-	card := app.Find("id:kpi-tasks")
-	if card.Style.Background != core.RGB(0xFFFFFF) || card.Style.BorderColor != core.RGB(0xDCE6F2) {
-		t.Errorf("card background/border = %x/%x, want FFFFFF/DCE6F2", card.Style.Background, card.Style.BorderColor)
-	}
-	if got := app.Find("id:refresh").Children[0].Style.Background; got != core.RGB(0x2563EB) {
-		t.Errorf("refresh background = %x, want 2563EB", got)
+	if got := app.Find("id:refresh").Children[0].Style.Background; got != core.RGB(0x4169E1) {
+		t.Errorf("refresh background = %x, want 4169E1", got)
 	}
 
 	app.Find("text:禅道助手")
-	app.Find("text:账号：rt.liang")
+	app.Find("text:rt.liang")
 	app.Find("text:已连接")
-	app.Find("text:上次刷新：2026-11-27 18:30")
-	for _, label := range []string{"未完成任务", "未解决 Bug", "本轮新增", "本轮状态变化"} {
+	app.Find("text:上次刷新 2026-11-27 18:30")
+	for _, label := range []string{"我的待办", "本轮动态", "未完成任务", "未解决 Bug", "状态"} {
 		app.Find("text:" + label)
 	}
 	for id, want := range map[string]string{
+		"kpi-open-value":   "2",
 		"kpi-tasks-value":  "1",
 		"kpi-bugs-value":   "1",
 		"kpi-new-value":    "2",
@@ -639,8 +636,8 @@ func TestWorkbenchSettingsOpensAndCloses(t *testing.T) {
 	if dialog.Props.Role != core.RoleDialog {
 		t.Fatalf("settings role = %v, want dialog", dialog.Props.Role)
 	}
-	if dialog.Style.Background != core.RGB(0xFFFFFF) || dialog.Style.BorderColor != core.RGB(0xDCE6F2) {
-		t.Fatalf("settings background/border = %x/%x, want FFFFFF/DCE6F2", dialog.Style.Background, dialog.Style.BorderColor)
+	if dialog.Style.Background != core.RGB(0xFFFFFF) || dialog.Style.BorderColor != core.RGB(0xE2E7ED) {
+		t.Fatalf("settings background/border = %x/%x, want FFFFFF/E2E7ED", dialog.Style.Background, dialog.Style.BorderColor)
 	}
 	if got := app.Find("id:poll-seconds").Text; got != "60" {
 		t.Fatalf("poll seconds = %q, want 60", got)

@@ -132,6 +132,11 @@ func (r *workbenchRuntime) login(account, password string) {
 				data.Loading = true // Controller.Start performs an immediate poll.
 				return data
 			})
+			// Ask only after an explicit, successful login. A denial is
+			// asynchronous and does not affect the established session.
+			if result.Snapshot.NotificationsEnabled {
+				r.cx.RequestNotificationPermission(nil)
+			}
 		})
 		r.startController(controller, account)
 	}()

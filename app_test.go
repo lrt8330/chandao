@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"chandao/zentaotray/internal/infrastructure/zentao"
 	"chandao/zentaotray/internal/ui"
 	"github.com/nsgo-dev/nsgo/core"
+	"github.com/nsgo-dev/nsgo/desktop"
 	"github.com/nsgo-dev/nsgo/nsgotest"
 )
 
@@ -78,6 +80,213 @@ func TestAppUsesMainViewWithoutDesktopWindow(t *testing.T) {
 	surface.Find("id:workbench")
 	surface.Find("id:login-panel")
 	surface.Find("text:请先登录禅道账号")
+}
+
+func TestWorkbenchTrayOptionsUseEmbeddedIconAndTooltip(t *testing.T) {
+	var clicks int
+	opts := workbenchTrayOptions(func() { clicks++ }, func() []desktop.MenuItem { return nil })
+	if !bytes.HasPrefix(opts.Icon, []byte("\x89PNG\r\n\x1a\n")) {
+		t.Fatal("tray icon is not an embedded PNG")
+	}
+	if opts.Tooltip != "禅道助手" || opts.Title != "禅道助手" {
+		t.Fatalf("tray title/tooltip = %q/%q, want 禅道助手", opts.Title, opts.Tooltip)
+	}
+	if opts.OnClick == nil || opts.Menu == nil {
+		t.Fatal("tray click or menu handler is missing")
+	}
+	opts.OnClick()
+	if clicks != 1 {
+		t.Fatalf("tray click callbacks = %d, want 1", clicks)
+	}
+}
+
+func TestTrayMenuReflectsWorkbenchState(t *testing.T) {
+	tests := []struct {
+		name string
+		data ui.WorkbenchData
+	}{
+		{name: "login required", data: ui.WorkbenchData{NeedsLogin: true, PollSeconds: 60, NotificationsEnabled: true}},
+		{name: "loading", data: ui.WorkbenchData{Loading: true, PollSeconds: 90, NotificationsEnabled: false}},
+		{name: "ready", data: ui.WorkbenchData{PollSeconds: 120, NotificationsEnabled: true}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			menu := buildTrayMenu(tc.data, func() {}, func() {}, func(int, bool) {}, func() {})
+			if len(menu) != 5 {
+				t.Fatalf("menu has %d items, want 5", len(menu))
+			}
+			for i, want := range []string{"打开工作台", "立即刷新", "", "桌面通知", "退出"} {
+				if menu[i].Label != want {
+					t.Errorf("menu[%d].Label = %q, want %q", i, menu[i].Label, want)
+				}
+			}
+			if !menu[2].Separator || menu[0].Separator || menu[1].Separator || menu[3].Separator || menu[4].Separator {
+				t.Fatal("tray menu separator is not between refresh and notifications")
+			}
+			if got, want := menu[1].Disabled, tc.data.Loading || tc.data.NeedsLogin; got != want {
+				t.Errorf("refresh disabled = %v, want %v", got, want)
+			}
+			if !menu[3].Checkable || menu[3].Checked != tc.data.NotificationsEnabled {
+				t.Errorf("notification item checkable/checked = %v/%v, want true/%v", menu[3].Checkable, menu[3].Checked, tc.data.NotificationsEnabled)
+			}
+			for _, i := range []int{0, 1, 3, 4} {
+				if menu[i].OnSelect == nil {
+					t.Errorf("menu[%d] has no action", i)
+				}
+			}
+		})
+	}
+}
+
+func TestTrayMenuActionsUseCurrentSettings(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		t.Run(fmt.Sprintf("notifications %v", enabled), func(t *testing.T) {
+			var opened, refreshed, quit int
+			var gotPollSeconds int
+			var gotNotifications bool
+			menu := buildTrayMenu(ui.WorkbenchData{PollSeconds: 75, NotificationsEnabled: enabled},
+				func() { opened++ },
+				func() { refreshed++ },
+				func(pollSeconds int, notifications bool) {
+					gotPollSeconds, gotNotifications = pollSeconds, notifications
+				},
+				func() { quit++ },
+			)
+			menu[0].OnSelect()
+			menu[1].OnSelect()
+			menu[3].OnSelect()
+			menu[4].OnSelect()
+			if opened != 1 || refreshed != 1 || quit != 1 {
+				t.Fatalf("open/refresh/quit calls = %d/%d/%d, want 1/1/1", opened, refreshed, quit)
+			}
+			if gotPollSeconds != 75 || gotNotifications == enabled {
+				t.Fatalf("settings callback = (%d, %v), want (75, %v)", gotPollSeconds, gotNotifications, !enabled)
+			}
+		})
+	}
+}
+
+func TestAppWindowCloseHidesAndTrayClickShows(t *testing.T) {
+	if nsgotest.Target() != "" {
+		t.Skip("uses headless window-close and tray-click models")
+	}
+	app, cx, runtime := startMountedWorkbench(t)
+	window := cx.MainWindow()
+	if window == nil {
+		t.Fatal("main window is missing")
+	}
+	if app.CloseWindow() {
+		t.Fatal("normal window close destroyed the main window")
+	}
+	app.Settle()
+	app.Post(func() {
+		if window.Closed() || window.Visible() {
+			t.Fatalf("after close: closed = %v, visible = %v; want false/false", window.Closed(), window.Visible())
+		}
+		if cx.MainWindow() != window || app.Quits != 0 || runtime.ctx.Err() != nil {
+			t.Fatalf("close stopped the app: main window preserved = %v, quits = %d, runtime error = %v", cx.MainWindow() == window, app.Quits, runtime.ctx.Err())
+		}
+	})
+	app.Settle()
+	app.Find("id:workbench")
+
+	app.ClickTrayTitle("禅道助手", core.MouseButtonLeft)
+	app.Settle()
+	app.Post(func() {
+		if window.Closed() || !window.Visible() {
+			t.Fatalf("after tray click: closed = %v, visible = %v; want false/true", window.Closed(), window.Visible())
+		}
+	})
+	app.Settle()
+}
+
+func TestAppTrayOpenAndQuitActions(t *testing.T) {
+	if nsgotest.Target() != "" {
+		t.Skip("uses the headless tray menu model")
+	}
+	app, cx, _ := startMountedWorkbench(t)
+	window := cx.MainWindow()
+	app.Post(window.Hide)
+	app.Settle()
+
+	app.ClickTrayTitle("禅道助手", core.MouseButtonRight)
+	app.ChoosePopup("打开工作台")
+	app.Settle()
+	app.Post(func() {
+		if window.Closed() || !window.Visible() {
+			t.Fatal("tray Open Workbench action did not show the main window")
+		}
+	})
+	app.Settle()
+
+	app.ClickTrayTitle("禅道助手", core.MouseButtonRight)
+	app.ChoosePopup("退出")
+	app.Settle()
+	if app.Quits != 1 {
+		t.Fatalf("quit requests = %d, want 1", app.Quits)
+	}
+}
+
+func TestAppForcedQuitAllowsWindowClose(t *testing.T) {
+	if nsgotest.Target() != "" {
+		t.Skip("uses the headless window-close model")
+	}
+	app, cx, _ := startMountedWorkbench(t)
+	window := cx.MainWindow()
+	app.RequestQuit(true)
+	if app.Quits != 1 {
+		t.Fatalf("forced quit requests = %d, want 1", app.Quits)
+	}
+	if !app.CloseWindow() || !window.Closed() {
+		t.Fatal("forced shutdown did not allow the normal window-close path")
+	}
+}
+
+func TestAppNotificationPressShowsWindowAndSelectsKey(t *testing.T) {
+	app, cx, runtime := startMountedWorkbench(t)
+	window := cx.MainWindow()
+	if window == nil {
+		t.Fatal("main window is missing")
+	}
+	app.GrantPermission(core.PermissionNotifications)
+	var showErr error
+	app.Post(func() {
+		showErr = cx.ShowNotification(core.Notification{ID: "bug:7", Title: "Bug 状态变化"}, nil)
+	})
+	app.Settle()
+	if showErr != nil {
+		t.Fatal(showErr)
+	}
+	if len(app.Notifications) != 1 {
+		t.Fatalf("shown notifications = %d, want 1", len(app.Notifications))
+	}
+	app.Post(window.Hide)
+	app.Settle()
+
+	app.PressNotification("bug:7")
+	app.Post(func() {
+		if window.Closed() || !window.Visible() {
+			t.Fatal("notification press did not show the main window")
+		}
+		if got := runtime.selectedKey.Get(); got != "bug:7" {
+			t.Fatalf("selected key after notification press = %q, want bug:7", got)
+		}
+	})
+	app.Settle()
+}
+
+func startMountedWorkbench(t *testing.T) (*nsgotest.App, *core.Scope, *workbenchRuntime) {
+	t.Helper()
+	var appScope *core.Scope
+	var runtime *workbenchRuntime
+	app := nsgotest.StartApp(t, func(cx *core.Scope) {
+		appScope = cx
+		runtime = mountWorkbench(cx)
+	},
+		nsgotest.Size(1200, 800),
+		nsgotest.Environment(core.Environment{OS: core.OSWindows, Idiom: core.IdiomDesktop, Locale: "zh-CN"}),
+	)
+	return app, appScope, runtime
 }
 
 func TestSnapshotItemsSortsByStableKey(t *testing.T) {

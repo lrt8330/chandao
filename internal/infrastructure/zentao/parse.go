@@ -215,9 +215,6 @@ func parseAssigned(body []byte, pageURL string, spec assignedSpec) ([]domain.Ite
 	if err != nil {
 		return nil, fmt.Errorf("%w: pagination metadata: %v", ErrUnexpectedStructure, err)
 	}
-	if pagination.hasTotal && pagination.total > len(rows) {
-		return nil, fmt.Errorf("%w: %d total rows but only %d are present", ErrPaginationRequired, pagination.total, len(rows))
-	}
 	items := make([]domain.Item, 0, len(rows))
 	seen := make(map[string]struct{}, len(rows))
 	for index, row := range rows {
@@ -242,6 +239,9 @@ func parseAssigned(body []byte, pageURL string, spec assignedSpec) ([]domain.Ite
 		if unfinished {
 			items = append(items, item)
 		}
+	}
+	if pagination.hasTotal && pagination.total > len(rows) {
+		return items, fmt.Errorf("%w: %d total rows but only %d are present", ErrPaginationRequired, pagination.total, len(rows))
 	}
 	return items, nil
 }

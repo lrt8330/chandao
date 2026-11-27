@@ -199,6 +199,75 @@ func TestFetchAssignedURLsAndCookiePersistence(t *testing.T) {
 	}
 }
 
+func TestFetchAssignedPagesUsePaginationQuery(t *testing.T) {
+	tests := []struct {
+		name  string
+		path  string
+		fetch func(context.Context, *Client, int, int) ([]byte, error)
+	}{
+		{
+			name: "tasks",
+			path: "/biz/my-task-type=assignedTo.html",
+			fetch: func(ctx context.Context, client *Client, pageID, recPerPage int) ([]byte, error) {
+				return client.FetchAssignedTasksPage(ctx, pageID, recPerPage)
+			},
+		},
+		{
+			name: "bugs",
+			path: "/biz/my-bug-type=assignedTo.html",
+			fetch: func(ctx context.Context, client *Client, pageID, recPerPage int) ([]byte, error) {
+				return client.FetchAssignedBugsPage(ctx, pageID, recPerPage)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != tt.path {
+					t.Errorf("path = %q, want %q", r.URL.Path, tt.path)
+				}
+				requests.Add(1)
+				if got := r.URL.Query().Get("pageID"); got != "3" {
+					t.Errorf("pageID = %q, want 3", got)
+				}
+				if got := r.URL.Query().Get("recPerPage"); got != "25" {
+					t.Errorf("recPerPage = %q, want 25", got)
+				}
+				fmt.Fprint(w, "page content")
+			}))
+			defer server.Close()
+
+			client, err := New(server.URL+"/biz/", "test-user", "test-password")
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			body, err := tt.fetch(context.Background(), client, 3, 25)
+			if err != nil {
+				t.Fatalf("fetch page: %v", err)
+			}
+			if string(body) != "page content" || requests.Load() != 1 {
+				t.Errorf("body = %q, requests = %d", body, requests.Load())
+			}
+		})
+	}
+}
+
+func TestFetchAssignedPagesRejectNonPositivePagination(t *testing.T) {
+	client, err := New("http://example.com/biz/", "test-user", "test-password")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for _, values := range [][2]int{{0, 100}, {-1, 100}, {1, 0}, {1, -1}} {
+		if body, err := client.FetchAssignedTasksPage(context.Background(), values[0], values[1]); body != nil || !errors.Is(err, ErrInvalidPagination) {
+			t.Errorf("tasks page (%d, %d) = %q, %v; want nil, ErrInvalidPagination", values[0], values[1], body, err)
+		}
+		if body, err := client.FetchAssignedBugsPage(context.Background(), values[0], values[1]); body != nil || !errors.Is(err, ErrInvalidPagination) {
+			t.Errorf("bugs page (%d, %d) = %q, %v; want nil, ErrInvalidPagination", values[0], values[1], body, err)
+		}
+	}
+}
+
 func TestAssignedPageRejectsLoginContent(t *testing.T) {
 	fixture, err := os.ReadFile(filepath.Join("..", "..", "..", "testdata", "login.html"))
 	if err != nil {

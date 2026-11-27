@@ -13,14 +13,14 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
-
-	"chandao/zentaotray/internal/application"
 )
 
 const (
 	defaultReferer         = "/biz/"
 	DefaultMaxResponseSize = 8 << 20
+	defaultRecPerPage      = 100
 )
 
 var (
@@ -29,6 +29,7 @@ var (
 	ErrResponseTooLarge   = errors.New("zentao response exceeds size limit")
 	ErrInvalidBaseURL     = errors.New("invalid zentao base URL")
 	ErrMissingCredentials = errors.New("zentao account and password are required")
+	ErrInvalidPagination  = errors.New("zentao pageID and recPerPage must be positive")
 
 	loginPathPattern = regexp.MustCompile(`(?i)user-login(?:-[a-z0-9+/]+={0,2})?\.html`)
 )
@@ -103,18 +104,32 @@ func (c *Client) Login(ctx context.Context) error {
 	return nil
 }
 
-// FetchAssignedTasks returns the raw HTML of the current user's assigned tasks.
+// FetchAssignedTasks returns the raw first page of the current user's assigned tasks.
 func (c *Client) FetchAssignedTasks(ctx context.Context) ([]byte, error) {
-	return c.fetchAssignedPage(ctx, "my-task-type=assignedTo.html")
+	return c.FetchAssignedTasksPage(ctx, 1, defaultRecPerPage)
 }
 
-// FetchAssignedBugs returns the raw HTML of the current user's assigned bugs.
+// FetchAssignedTasksPage returns one raw page of the current user's assigned tasks.
+func (c *Client) FetchAssignedTasksPage(ctx context.Context, pageID, recPerPage int) ([]byte, error) {
+	return c.fetchAssignedPage(ctx, "my-task-type=assignedTo.html", pageID, recPerPage)
+}
+
+// FetchAssignedBugs returns the raw first page of the current user's assigned bugs.
 func (c *Client) FetchAssignedBugs(ctx context.Context) ([]byte, error) {
-	return c.fetchAssignedPage(ctx, "my-bug-type=assignedTo.html")
+	return c.FetchAssignedBugsPage(ctx, 1, defaultRecPerPage)
 }
 
-func (c *Client) fetchAssignedPage(ctx context.Context, path string) ([]byte, error) {
-	body, err := c.request(ctx, http.MethodGet, path, nil, "")
+// FetchAssignedBugsPage returns one raw page of the current user's assigned bugs.
+func (c *Client) FetchAssignedBugsPage(ctx context.Context, pageID, recPerPage int) ([]byte, error) {
+	return c.fetchAssignedPage(ctx, "my-bug-type=assignedTo.html", pageID, recPerPage)
+}
+
+func (c *Client) fetchAssignedPage(ctx context.Context, path string, pageID, recPerPage int) ([]byte, error) {
+	if pageID <= 0 || recPerPage <= 0 {
+		return nil, ErrInvalidPagination
+	}
+	query := url.Values{"pageID": {strconv.Itoa(pageID)}, "recPerPage": {strconv.Itoa(recPerPage)}}
+	body, err := c.request(ctx, http.MethodGet, path+"?"+query.Encode(), nil, "")
 	if err != nil {
 		return nil, fmt.Errorf("fetch zentao assigned page: %w", err)
 	}
@@ -231,5 +246,3 @@ func (c *Client) request(ctx context.Context, method, path string, form url.Valu
 	}
 	return response, nil
 }
-
-var _ application.ZentaoClient = (*Client)(nil)

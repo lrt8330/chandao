@@ -304,8 +304,21 @@ func TestParseAssignedTasksRequiresPaginationUnlessAllRowsArePresent(t *testing.
 		if !errors.Is(err, ErrPaginationRequired) {
 			t.Fatalf("items = %#v, error = %v, want ErrPaginationRequired", items, err)
 		}
-		if items != nil {
-			t.Fatalf("items = %#v, want nil", items)
+		if len(items) != 1 || items[0].ID != "1001" {
+			t.Fatalf("items = %#v, want the row parsed before pagination was required", items)
+		}
+	})
+	t.Run("bugs missing rows retain parsed active items", func(t *testing.T) {
+		body := []byte(`<input id="recTotal" value="3"><input id="recPerPage" value="1"><table id="bugList"><tbody>
+		<tr data-id="2001"><td class="c-title"><a href="/biz/bug-view-2001.html">第一页缺陷</a></td><td class="c-status">active</td><td class="c-project">示例项目</td><td class="c-lastEditedDate">2026-11-27</td></tr>
+		<tr data-id="2002"><td class="c-title"><a href="/biz/bug-view-2002.html">已解决缺陷</a></td><td class="c-status">resolved</td><td class="c-project">示例项目</td><td class="c-lastEditedDate">2026-11-27</td></tr>
+		</tbody></table>`)
+		items, err := ParseAssignedBugs(body, assignedBugsPageURL)
+		if !errors.Is(err, ErrPaginationRequired) {
+			t.Fatalf("items = %#v, error = %v, want ErrPaginationRequired", items, err)
+		}
+		if len(items) != 1 || items[0].ID != "2001" {
+			t.Fatalf("items = %#v, want only the parsed active bug", items)
 		}
 	})
 	t.Run("all rows present", func(t *testing.T) {

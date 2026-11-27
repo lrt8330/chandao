@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"chandao/zentaotray/internal/application"
@@ -28,6 +29,8 @@ var (
 	ErrResponseTooLarge   = errors.New("zentao response exceeds size limit")
 	ErrInvalidBaseURL     = errors.New("invalid zentao base URL")
 	ErrMissingCredentials = errors.New("zentao account and password are required")
+
+	loginPathPattern = regexp.MustCompile(`(?i)user-login(?:-[a-z0-9+/]+={0,2})?\.html`)
 )
 
 // Client logs in and fetches raw assigned-item pages using a persistent cookie jar.
@@ -124,30 +127,27 @@ func (c *Client) fetchAssignedPage(ctx context.Context, path string) ([]byte, er
 func isLoginPage(body []byte) bool {
 	content := strings.ToLower(string(body))
 	const loginPath = "user-login.html"
+	hasAccountField := strings.Contains(content, `name="account"`) ||
+		strings.Contains(content, `name='account'`) || strings.Contains(content, `name=account`)
 	hasPasswordField := strings.Contains(content, `name="password"`) ||
 		strings.Contains(content, `name='password'`) || strings.Contains(content, `name=password`)
 	hasLoginFormID := strings.Contains(content, `id="loginform"`) ||
 		strings.Contains(content, `id='loginform'`) || strings.Contains(content, `id=loginform`)
-	if hasLoginFormID || (strings.Contains(content, "<form") && hasPasswordField && strings.Contains(content, loginPath)) {
+	if hasLoginFormID || (strings.Contains(content, "<form") && hasAccountField && hasPasswordField) ||
+		(strings.Contains(content, "<form") && hasPasswordField && strings.Contains(content, loginPath)) {
 		return true
 	}
 
 	redirectMarkers := []string{
-		"location.href", "location.replace", "location.assign", "window.location",
+		"self.location", "location.href", "location.replace", "location.assign", "window.location",
 		"location=", "http-equiv=\"refresh\"", "http-equiv='refresh'",
 	}
-	searchFrom := 0
-	for {
-		index := strings.Index(content[searchFrom:], loginPath)
-		if index < 0 {
-			return false
-		}
-		index += searchFrom
-		start := index - 160
+	for _, match := range loginPathPattern.FindAllStringIndex(content, -1) {
+		start := match[0] - 160
 		if start < 0 {
 			start = 0
 		}
-		end := index + len(loginPath) + 80
+		end := match[1] + 80
 		if end > len(content) {
 			end = len(content)
 		}
@@ -157,8 +157,8 @@ func isLoginPage(body []byte) bool {
 				return true
 			}
 		}
-		searchFrom = index + len(loginPath)
 	}
+	return false
 }
 
 func (c *Client) randomChallenge(ctx context.Context) (string, error) {

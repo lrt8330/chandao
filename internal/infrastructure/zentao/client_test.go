@@ -209,6 +209,8 @@ func TestAssignedPageRejectsLoginContent(t *testing.T) {
 		body string
 	}{
 		{name: "sanitized login form", body: string(fixture)},
+		{name: "login form without id or login action", body: `<html><form method="post" action="/biz/"><input type="text" name="account"><input type="password" name="password"></form></html>`},
+		{name: "pretty login redirect", body: "<html><meta charset='utf-8'/><style>body{background:white}</style><script>self.location='/biz/user-login-L2Jpei8=.html';\n\n</script></html>"},
 		{name: "location href redirect", body: `<html><script>window.location.href = "/biz/user-login.html";</script></html>`},
 		{name: "location replace redirect", body: `<html><script>window.location.replace('/biz/user-login.html?referer=%2Fbiz%2F');</script></html>`},
 		{name: "meta refresh redirect", body: `<html><head><meta http-equiv="refresh" content="0; url=/biz/user-login.html"></head></html>`},
@@ -408,22 +410,32 @@ func TestLoginJSONResultHandling(t *testing.T) {
 }
 
 func TestAssignedPageAllowsLoginLinkInData(t *testing.T) {
-	const body = `<html><body><a href="/biz/user-login.html">login documentation</a><p>assigned task data</p></body></html>`
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, body)
-	}))
-	defer server.Close()
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "standard login link", body: `<html><body><a href="/biz/user-login.html">login documentation</a><p>assigned task data</p></body></html>`},
+		{name: "pretty login link", body: `<html><body><a href="/biz/user-login-L2Jpei8=.html">login documentation</a><p>assigned task data</p></body></html>`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprint(w, tt.body)
+			}))
+			defer server.Close()
 
-	client, err := New(server.URL+"/biz/", "test-user", "test-password")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	got, err := client.FetchAssignedBugs(context.Background())
-	if err != nil {
-		t.Fatalf("FetchAssignedBugs: %v", err)
-	}
-	if string(got) != body {
-		t.Errorf("body = %q, want assigned data", got)
+			client, err := New(server.URL+"/biz/", "test-user", "test-password")
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			got, err := client.FetchAssignedBugs(context.Background())
+			if err != nil {
+				t.Fatalf("FetchAssignedBugs: %v", err)
+			}
+			if string(got) != tt.body {
+				t.Errorf("body = %q, want assigned data", got)
+			}
+		})
 	}
 }
 

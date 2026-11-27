@@ -1,0 +1,604 @@
+package zentao
+
+import (
+	"context"
+	"crypto/md5"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func TestNewValidatesConfiguration(t *testing.T) {
+	tests := []struct {
+		name     string
+		baseURL  string
+		account  string
+		password string
+	}{
+		{name: "malformed URL", baseURL: "://bad", account: "alice", password: "test-password"},
+		{name: "relative URL", baseURL: "/biz/", account: "alice", password: "test-password"},
+		{name: "unsupported scheme", baseURL: "ftp://example.com/biz/", account: "alice", password: "test-password"},
+		{name: "URL credentials", baseURL: "http://alice:test-password@example.com/biz/", account: "alice", password: "test-password"},
+		{name: "URL query", baseURL: "http://example.com/biz/?token=secret-token", account: "alice", password: "test-password"},
+		{name: "URL fragment", baseURL: "http://example.com/biz/#secret-token", account: "alice", password: "test-password"},
+		{name: "empty account", baseURL: "http://example.com/biz/", account: " ", password: "test-password"},
+		{name: "empty password", baseURL: "http://example.com/biz/", account: "alice", password: " "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, err := New(tt.baseURL, tt.account, tt.password)
+			if client != nil {
+				t.Errorf("New client = %#v, want nil", client)
+			}
+			assertErrorOmits(t, err, "test-password", "secret-token")
+		})
+	}
+
+	client, err := New(" http://example.com/biz ", " alice ", " test-password ")
+	if err != nil {
+		t.Fatalf("New valid configuration: %v", err)
+	}
+	if client.BaseURL != "http://example.com/biz/" || client.Account != "alice" || client.Password != "test-password" {
+		t.Errorf("normalized client configuration = %#v", client)
+	}
+	if client.HTTPClient == nil || client.Jar == nil || client.HTTPClient.Jar != client.Jar {
+		t.Error("New did not attach an isolated cookie jar to its HTTP client")
+	}
+	if client.MaxResponseBytes != DefaultMaxResponseSize {
+		t.Errorf("MaxResponseBytes = %d, want %d", client.MaxResponseBytes, DefaultMaxResponseSize)
+	}
+}
+
+func TestLoginSubmitsVerifiedProtocol(t *testing.T) {
+	const password = "test-password"
+	const challenge = "123456"
+	wantPassword := md5Hex(md5Hex(password) + challenge)
+
+	var challengeRequests atomic.Int32
+	var loginRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/biz/user-refreshRandom.html":
+			challengeRequests.Add(1)
+			if r.Method != http.MethodGet {
+				t.Errorf("challenge method = %q, want GET", r.Method)
+			}
+			fmt.Fprint(w, " \n"+challenge+"\n ")
+		case "/biz/user-login.html":
+			loginRequests.Add(1)
+			if r.Method != http.MethodPost {
+				t.Errorf("login method = %q, want POST", r.Method)
+			}
+			if got := r.Header.Get("Content-Type"); got != "application/x-www-form-urlencoded" {
+				t.Errorf("Content-Type = %q, want form encoding", got)
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("ParseForm: %v", err)
+			}
+			wantForm := map[string]string{
+				"account":          "alice",
+				"password":         wantPassword,
+				"passwordStrength": "0",
+				"referer":          "/biz/",
+				"verifyRand":       challenge,
+				"keepLogin":        "0",
+				"captcha":          "",
+			}
+			for key, want := range wantForm {
+				if got := r.PostForm.Get(key); got != want {
+					t.Errorf("form[%q] = %q, want %q", key, got, want)
+				}
+			}
+			if _, ok := r.PostForm["captcha"]; !ok {
+				t.Error("captcha field is absent, want an explicitly empty field")
+			}
+			http.SetCookie(w, &http.Cookie{Name: "zentaosid", Value: "test-session", Path: "/biz/", HttpOnly: true})
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"result":"success","locate":"/biz/"}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL+"/biz/", " alice ", " "+password+" ")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := client.Login(context.Background()); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if got := challengeRequests.Load(); got != 1 {
+		t.Errorf("challenge requests = %d, want 1", got)
+	}
+	if got := loginRequests.Load(); got != 1 {
+		t.Errorf("login requests = %d, want 1", got)
+	}
+}
+
+func TestFetchAssignedURLsAndCookiePersistence(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		response string
+		fetch    func(context.Context, *Client) ([]byte, error)
+	}{
+		{
+			name:     "assigned tasks",
+			path:     "/biz/my-task-type=assignedTo.html",
+			response: "<html><body>assigned tasks</body></html>",
+			fetch: func(ctx context.Context, client *Client) ([]byte, error) {
+				return client.FetchAssignedTasks(ctx)
+			},
+		},
+		{
+			name:     "assigned bugs",
+			path:     "/biz/my-bug-type=assignedTo.html",
+			response: "<html><body>assigned bugs</body></html>",
+			fetch: func(ctx context.Context, client *Client) ([]byte, error) {
+				return client.FetchAssignedBugs(ctx)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var pageRequests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/biz/user-refreshRandom.html":
+					fmt.Fprint(w, "654321")
+				case "/biz/user-login.html":
+					http.SetCookie(w, &http.Cookie{Name: "zentaosid", Value: "persisted-test-session", Path: "/biz/", HttpOnly: true})
+					writeJSON(t, w, map[string]string{"result": "success", "locate": "/biz/"})
+				case tt.path:
+					pageRequests.Add(1)
+					if r.Method != http.MethodGet {
+						t.Errorf("page method = %q, want GET", r.Method)
+					}
+					cookie, err := r.Cookie("zentaosid")
+					if err != nil || cookie.Value != "persisted-test-session" {
+						t.Errorf("session cookie = %v, %v; want persisted-test-session", cookie, err)
+					}
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					fmt.Fprint(w, tt.response)
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			client, err := New(server.URL+"/biz", "test-user", "test-password")
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if err := client.Login(context.Background()); err != nil {
+				t.Fatalf("Login: %v", err)
+			}
+			body, err := tt.fetch(context.Background(), client)
+			if err != nil {
+				t.Fatalf("fetch: %v", err)
+			}
+			if got, want := string(body), tt.response; got != want {
+				t.Errorf("body = %q, want %q", got, want)
+			}
+			if got := pageRequests.Load(); got != 1 {
+				t.Errorf("page requests = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestAssignedPageRejectsLoginContent(t *testing.T) {
+	fixture, err := os.ReadFile(filepath.Join("..", "..", "..", "testdata", "login.html"))
+	if err != nil {
+		t.Fatalf("read login fixture: %v", err)
+	}
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "sanitized login form", body: string(fixture)},
+		{name: "location href redirect", body: `<html><script>window.location.href = "/biz/user-login.html";</script></html>`},
+		{name: "location replace redirect", body: `<html><script>window.location.replace('/biz/user-login.html?referer=%2Fbiz%2F');</script></html>`},
+		{name: "meta refresh redirect", body: `<html><head><meta http-equiv="refresh" content="0; url=/biz/user-login.html"></head></html>`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/biz/my-task-type=assignedTo.html" {
+					t.Errorf("path = %q, want assigned tasks", r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				fmt.Fprint(w, tt.body)
+			}))
+			defer server.Close()
+
+			client, err := New(server.URL+"/biz/", "test-user", "test-password")
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			body, err := client.FetchAssignedTasks(context.Background())
+			if body != nil {
+				t.Errorf("body = %q, want nil for a login page", body)
+			}
+			if !errors.Is(err, ErrSessionExpired) {
+				t.Fatalf("error = %v, want ErrSessionExpired", err)
+			}
+		})
+	}
+}
+
+func md5Hex(value string) string {
+	sum := md5.Sum([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func TestLoginRandomChallengeValidation(t *testing.T) {
+	tests := []struct {
+		name         string
+		status       int
+		body         string
+		maxResponse  int64
+		wantTooLarge bool
+	}{
+		{name: "empty challenge", status: http.StatusOK, body: " \n\t "},
+		{name: "non numeric challenge", status: http.StatusOK, body: "12ab56"},
+		{name: "json is not a plain challenge", status: http.StatusOK, body: `{"verifyRand":123}`},
+		{name: "non 2xx challenge", status: http.StatusServiceUnavailable, body: "sensitive challenge response"},
+		{name: "oversized challenge", status: http.StatusOK, body: strings.Repeat("1", 33), maxResponse: 32, wantTooLarge: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var loginRequests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/biz/user-login.html" {
+					loginRequests.Add(1)
+					writeJSON(t, w, map[string]string{"result": "success"})
+					return
+				}
+				if r.URL.Path != "/biz/user-refreshRandom.html" {
+					t.Errorf("unexpected path %q", r.URL.Path)
+				}
+				w.WriteHeader(tt.status)
+				fmt.Fprint(w, tt.body)
+			}))
+			defer server.Close()
+
+			client, err := New(server.URL+"/biz/", "test-user", "test-password")
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if tt.maxResponse > 0 {
+				client.MaxResponseBytes = tt.maxResponse
+			}
+			err = client.Login(context.Background())
+			if tt.wantTooLarge {
+				if !errors.Is(err, ErrResponseTooLarge) {
+					t.Fatalf("error = %v, want ErrResponseTooLarge", err)
+				}
+			} else if err == nil {
+				t.Fatal("Login succeeded with an invalid challenge")
+			}
+			assertErrorOmits(t, err, "test-password", "sensitive challenge response")
+			if got := loginRequests.Load(); got != 0 {
+				t.Errorf("login requests = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestLoginPasswordHashCases(t *testing.T) {
+	tests := []struct {
+		name     string
+		password string
+	}{
+		{name: "simple password", password: "simple-password"},
+		{name: "surrounding whitespace is trimmed", password: "  padded-password\t"},
+		{name: "utf8 and form punctuation", password: " päss&+word "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const challenge = "000042"
+			trimmed := strings.TrimSpace(tt.password)
+			wantHash := md5Hex(md5Hex(trimmed) + challenge)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/biz/user-refreshRandom.html":
+					fmt.Fprint(w, challenge)
+				case "/biz/user-login.html":
+					if err := r.ParseForm(); err != nil {
+						t.Errorf("ParseForm: %v", err)
+					}
+					if got := r.PostForm.Get("password"); got != wantHash {
+						t.Errorf("password hash = %q, want %q", got, wantHash)
+					}
+					if got := r.PostForm.Get("account"); got != "test-user" {
+						t.Errorf("account = %q, want test-user", got)
+					}
+					writeJSON(t, w, map[string]string{"result": "success", "locate": "/biz/"})
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			client, err := New(server.URL+"/biz/", " test-user ", tt.password)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if err := client.Login(context.Background()); err != nil {
+				t.Fatalf("Login: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoginJSONResultHandling(t *testing.T) {
+	tests := []struct {
+		name            string
+		status          int
+		body            string
+		wantSuccess     bool
+		wantLoginFailed bool
+	}{
+		{name: "success without locate", status: http.StatusOK, body: `{"result":"success"}`, wantSuccess: true},
+		{name: "success locate is not followed", status: http.StatusOK, body: `{"result":"success","locate":"/biz/"}`, wantSuccess: true},
+		{name: "rejected credentials", status: http.StatusOK, body: `{"result":"fail","message":"test-password secret-token full-response-marker"}`, wantLoginFailed: true},
+		{name: "missing result", status: http.StatusOK, body: `{"message":"full-response-marker"}`},
+		{name: "malformed json", status: http.StatusOK, body: `{"result":`},
+		{name: "html error page", status: http.StatusOK, body: `<html>full-response-marker</html>`},
+		{name: "non 2xx login", status: http.StatusUnauthorized, body: "full-response-marker"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var unexpectedRequests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/biz/user-refreshRandom.html":
+					fmt.Fprint(w, "123456")
+				case "/biz/user-login.html":
+					http.SetCookie(w, &http.Cookie{Name: "zentaosid", Value: "secret-cookie", Path: "/biz/", HttpOnly: true})
+					w.WriteHeader(tt.status)
+					fmt.Fprint(w, tt.body)
+				case "/biz/":
+					unexpectedRequests.Add(1)
+					fmt.Fprint(w, "dashboard")
+				default:
+					unexpectedRequests.Add(1)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			client, err := New(server.URL+"/biz/", "test-user", "test-password")
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			err = client.Login(context.Background())
+			if tt.wantSuccess {
+				if err != nil {
+					t.Fatalf("Login: %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("Login succeeded, want an error")
+				}
+				if tt.wantLoginFailed && !errors.Is(err, ErrLoginFailed) {
+					t.Errorf("error = %v, want ErrLoginFailed", err)
+				}
+				assertErrorOmits(t, err, "test-password", "secret-cookie", "secret-token", "full-response-marker")
+			}
+			if got := unexpectedRequests.Load(); got != 0 {
+				t.Errorf("unexpected follow-up requests = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestAssignedPageAllowsLoginLinkInData(t *testing.T) {
+	const body = `<html><body><a href="/biz/user-login.html">login documentation</a><p>assigned task data</p></body></html>`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, body)
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL+"/biz/", "test-user", "test-password")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got, err := client.FetchAssignedBugs(context.Background())
+	if err != nil {
+		t.Fatalf("FetchAssignedBugs: %v", err)
+	}
+	if string(got) != body {
+		t.Errorf("body = %q, want assigned data", got)
+	}
+}
+
+func TestFetchAssignedHTTPFailures(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		fetch  func(context.Context, *Client) ([]byte, error)
+	}{
+		{name: "tasks unauthorized", status: http.StatusUnauthorized, fetch: func(ctx context.Context, client *Client) ([]byte, error) { return client.FetchAssignedTasks(ctx) }},
+		{name: "tasks server error", status: http.StatusInternalServerError, fetch: func(ctx context.Context, client *Client) ([]byte, error) { return client.FetchAssignedTasks(ctx) }},
+		{name: "bugs forbidden", status: http.StatusForbidden, fetch: func(ctx context.Context, client *Client) ([]byte, error) { return client.FetchAssignedBugs(ctx) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.status)
+				fmt.Fprint(w, "full-response-marker secret-cookie")
+			}))
+			defer server.Close()
+
+			client, err := New(server.URL+"/biz/", "test-user", "test-password")
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			body, err := tt.fetch(context.Background(), client)
+			if body != nil {
+				t.Errorf("body = %q, want nil", body)
+			}
+			if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("HTTP status %d", tt.status)) {
+				t.Fatalf("error = %v, want HTTP status %d", err, tt.status)
+			}
+			assertErrorOmits(t, err, "test-password", "full-response-marker", "secret-cookie")
+		})
+	}
+}
+
+func TestFetchAssignedRejectsOversizedBody(t *testing.T) {
+	tests := []struct {
+		name  string
+		fetch func(context.Context, *Client) ([]byte, error)
+	}{
+		{name: "tasks", fetch: func(ctx context.Context, client *Client) ([]byte, error) { return client.FetchAssignedTasks(ctx) }},
+		{name: "bugs", fetch: func(ctx context.Context, client *Client) ([]byte, error) { return client.FetchAssignedBugs(ctx) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprint(w, strings.Repeat("x", 65))
+			}))
+			defer server.Close()
+
+			client, err := New(server.URL+"/biz/", "test-user", "test-password")
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			client.MaxResponseBytes = 64
+			body, err := tt.fetch(context.Background(), client)
+			if body != nil {
+				t.Errorf("body length = %d, want nil", len(body))
+			}
+			if !errors.Is(err, ErrResponseTooLarge) {
+				t.Fatalf("error = %v, want ErrResponseTooLarge", err)
+			}
+		})
+	}
+}
+
+func TestClientHonorsCanceledContext(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(context.Context, *Client) error
+	}{
+		{name: "login", call: func(ctx context.Context, client *Client) error { return client.Login(ctx) }},
+		{name: "assigned tasks", call: func(ctx context.Context, client *Client) error {
+			_, err := client.FetchAssignedTasks(ctx)
+			return err
+		}},
+		{name: "assigned bugs", call: func(ctx context.Context, client *Client) error {
+			_, err := client.FetchAssignedBugs(ctx)
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				http.Error(w, "unexpected request", http.StatusInternalServerError)
+			}))
+			defer server.Close()
+
+			client, err := New(server.URL+"/biz/", "test-user", "test-password")
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			err = tt.call(ctx, client)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("error = %v, want context.Canceled", err)
+			}
+			if got := requests.Load(); got != 0 {
+				t.Errorf("requests = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestClientCancellationDuringRequest(t *testing.T) {
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL+"/biz/", "test-user", "test-password")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := client.FetchAssignedTasks(ctx)
+		result <- err
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("request did not stop after context cancellation")
+	}
+}
+
+func TestRequestErrorOmitsSensitiveRedirectURL(t *testing.T) {
+	const token = "secret-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/biz/user-refreshRandom.html" {
+			http.Redirect(w, r, "/failed?token="+token, http.StatusFound)
+			return
+		}
+		panic(http.ErrAbortHandler)
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL+"/biz/", "test-user", "test-password")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	err = client.Login(context.Background())
+	assertErrorOmits(t, err, "test-password", token)
+}
+
+func assertErrorOmits(t *testing.T, err error, secrets ...string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	for _, secret := range secrets {
+		if secret != "" && strings.Contains(err.Error(), secret) {
+			t.Errorf("error contains sensitive value %q: %v", secret, err)
+		}
+	}
+}
+
+func writeJSON(t *testing.T, w http.ResponseWriter, value any) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		t.Errorf("write response: %v", err)
+	}
+}

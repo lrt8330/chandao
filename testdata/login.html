@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>登录 - 禅道</title>
+</head>
+<body>
+  <main id="mainContent">
+    <section id="login">
+      <h1>禅道登录</h1>
+      <form id="loginForm" method="post" action="/biz/user-login.html">
+        <label>账号 <input type="text" name="account" autocomplete="username"></label>
+        <label>密码 <input type="password" name="password" autocomplete="current-password"></label>
+        <input type="hidden" name="referer" value="/biz/">
+        <input type="hidden" name="keepLogin" value="0">
+        <button type="submit">登录</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

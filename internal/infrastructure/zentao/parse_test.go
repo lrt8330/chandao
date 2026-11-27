@@ -3,6 +3,7 @@ package zentao
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -331,6 +332,152 @@ func TestParseAssignedTasksRequiresPaginationUnlessAllRowsArePresent(t *testing.
 			t.Fatalf("items = %#v, want both rows", items)
 		}
 	})
+}
+
+func TestParseAssignedTasksPaginationUsesPageContext(t *testing.T) {
+	const firstRow = `<tr data-id="1001"><td class="c-name"><a href="/biz/task-view-1001.html">第一页任务</a></td><td class="c-status">wait</td><td class="c-project">示例项目</td><td class="c-lastEditedDate">2026-11-27</td></tr>`
+	const secondRow = `<tr data-id="1002"><td class="c-name"><a href="/biz/task-view-1002.html">第二页任务</a></td><td class="c-status">doing</td><td class="c-project">示例项目</td><td class="c-lastEditedDate">2026-11-27</td></tr>`
+	tests := []struct {
+		name           string
+		total          int
+		metadataSize   int
+		query          string
+		rows           string
+		wantIDs        []string
+		wantErr        error
+		wantErrText    string
+		wantNilOnError bool
+	}{
+		{
+			name:         "full first page requires another page",
+			total:        3,
+			metadataSize: 2,
+			query:        "pageID=1&recPerPage=2",
+			rows:         firstRow + secondRow,
+			wantIDs:      []string{"1001", "1002"},
+			wantErr:      ErrPaginationRequired,
+		},
+		{
+			name:         "partial final page completes collection",
+			total:        3,
+			metadataSize: 2,
+			query:        "pageID=2&recPerPage=2",
+			rows:         secondRow,
+			wantIDs:      []string{"1002"},
+		},
+		{
+			name:         "constant total completes on short final page",
+			total:        2,
+			metadataSize: 100,
+			query:        "pageID=2&recPerPage=100",
+			rows:         secondRow,
+			wantIDs:      []string{"1002"},
+		},
+		{
+			name:         "page beyond total is cleanly complete",
+			total:        2,
+			metadataSize: 2,
+			query:        "pageID=3&recPerPage=2",
+			wantIDs:      []string{},
+		},
+		{
+			name:           "incomplete middle page is an error",
+			total:          5,
+			metadataSize:   2,
+			query:          "pageID=2&recPerPage=2",
+			rows:           secondRow,
+			wantErr:        ErrIncompletePage,
+			wantErrText:    "page 2 expected 2 rows, got 1",
+			wantNilOnError: true,
+			wantIDs:        []string{},
+		},
+		{
+			name:           "one row cannot fill an oversized first page",
+			total:          2,
+			metadataSize:   100,
+			query:          "pageID=1&recPerPage=100",
+			rows:           firstRow,
+			wantErr:        ErrIncompletePage,
+			wantErrText:    "page 1 expected 2 rows, got 1",
+			wantNilOnError: true,
+			wantIDs:        []string{},
+		},
+		{
+			name:           "query page size drives expected rows",
+			total:          5,
+			metadataSize:   100,
+			query:          "pageID=2&recPerPage=2",
+			rows:           secondRow,
+			wantErr:        ErrIncompletePage,
+			wantErrText:    "page 2 expected 2 rows, got 1",
+			wantNilOnError: true,
+			wantIDs:        []string{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(fmt.Sprintf(`<input id="recTotal" value="%d"><input id="recPerPage" value="%d"><table id="tasktable"><tbody>%s</tbody></table>`, tt.total, tt.metadataSize, tt.rows))
+			items, err := ParseAssignedTasks(body, assignedTasksPageURL+"?"+tt.query)
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("items = %#v, error = %v, want %v", items, err, tt.wantErr)
+			}
+			if tt.wantErr == nil && err != nil {
+				t.Fatalf("ParseAssignedTasks: %v", err)
+			}
+			if tt.wantErrText != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErrText)) {
+				t.Fatalf("error = %v, want text %q", err, tt.wantErrText)
+			}
+			if errors.Is(err, ErrIncompletePage) && errors.Is(err, ErrPaginationRequired) {
+				t.Fatalf("error = %v, incomplete pages must not request another page", err)
+			}
+			if tt.wantNilOnError && items != nil {
+				t.Fatalf("items = %#v, want nil for an incomplete page", items)
+			}
+			if tt.wantErr == nil && items == nil {
+				t.Fatal("items = nil, want a non-nil slice on success")
+			}
+			gotIDs := make([]string, 0, len(items))
+			for _, item := range items {
+				gotIDs = append(gotIDs, item.ID)
+			}
+			if !reflect.DeepEqual(gotIDs, tt.wantIDs) {
+				t.Fatalf("item IDs = %v, want %v", gotIDs, tt.wantIDs)
+			}
+		})
+	}
+}
+
+func TestParseAssignedTasksRejectsInvalidPaginationQuery(t *testing.T) {
+	body := []byte(`<input id="recTotal" value="2"><input id="recPerPage" value="100"><table id="tasktable"><tbody><tr data-id="1001"><td class="c-name"><a href="/biz/task-view-1001.html">分页查询测试</a></td><td class="c-status">wait</td><td class="c-project">示例项目</td><td class="c-lastEditedDate">2026-11-27</td></tr></tbody></table>`)
+	tests := []struct {
+		name  string
+		query string
+	}{
+		{name: "zero page ID", query: "pageID=0&recPerPage=100"},
+		{name: "negative page ID", query: "pageID=-1&recPerPage=100"},
+		{name: "nonnumeric page ID", query: "pageID=abc&recPerPage=100"},
+		{name: "empty page ID", query: "pageID=&recPerPage=100"},
+		{name: "repeated page ID", query: "pageID=1&pageID=2&recPerPage=100"},
+		{name: "overflowing page ID", query: "pageID=9223372036854775808&recPerPage=100"},
+		{name: "zero page size", query: "pageID=1&recPerPage=0"},
+		{name: "negative page size", query: "pageID=1&recPerPage=-1"},
+		{name: "nonnumeric page size", query: "pageID=1&recPerPage=abc"},
+		{name: "empty page size", query: "pageID=1&recPerPage="},
+		{name: "repeated page size", query: "pageID=1&recPerPage=100&recPerPage=100"},
+		{name: "overflowing page size", query: "pageID=1&recPerPage=9223372036854775808"},
+		{name: "malformed query escape", query: "pageID=%zz&recPerPage=100"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			items, err := ParseAssignedTasks(body, assignedTasksPageURL+"?"+tt.query)
+			if !errors.Is(err, ErrInvalidPagination) {
+				t.Fatalf("items = %#v, error = %v, want ErrInvalidPagination", items, err)
+			}
+			if items != nil {
+				t.Fatalf("items = %#v, want nil for invalid pagination", items)
+			}
+		})
+	}
 }
 
 func TestHasMorePagesReadsPaginationMetadata(t *testing.T) {

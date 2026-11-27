@@ -20,6 +20,7 @@ var (
 	ErrUnexpectedStructure = errors.New("unexpected zentao assigned page structure")
 	ErrInvalidDetailURL    = errors.New("invalid zentao detail URL")
 	ErrDuplicateItemID     = errors.New("duplicate zentao item ID")
+	ErrIncompletePage      = errors.New("incomplete zentao assigned page")
 	ErrPaginationRequired  = errors.New("zentao assigned page requires pagination")
 )
 
@@ -169,7 +170,8 @@ func decodeAssignedHTML(body []byte) ([]byte, error) {
 }
 
 func parseAssigned(body []byte, pageURL string, spec assignedSpec) ([]domain.Item, error) {
-	if _, err := parsePageURL(pageURL); err != nil {
+	base, err := parsePageURL(pageURL)
+	if err != nil {
 		return nil, err
 	}
 	decoded, err := decodeAssignedHTML(body)
@@ -215,6 +217,10 @@ func parseAssigned(body []byte, pageURL string, spec assignedSpec) ([]domain.Ite
 	if err != nil {
 		return nil, fmt.Errorf("%w: pagination metadata: %v", ErrUnexpectedStructure, err)
 	}
+	pageID, perPage, err := readPagePagination(base, pagination)
+	if err != nil {
+		return nil, err
+	}
 	items := make([]domain.Item, 0, len(rows))
 	seen := make(map[string]struct{}, len(rows))
 	for index, row := range rows {
@@ -240,10 +246,65 @@ func parseAssigned(body []byte, pageURL string, spec assignedSpec) ([]domain.Ite
 			items = append(items, item)
 		}
 	}
-	if pagination.hasTotal && pagination.total > len(rows) {
-		return items, fmt.Errorf("%w: %d total rows but only %d are present", ErrPaginationRequired, pagination.total, len(rows))
+	if pagination.hasTotal {
+		pageOffset := pageID - 1
+		expected := 0
+		complete := false
+		if pageOffset > pagination.total/perPage {
+			complete = true
+		} else {
+			remaining := pagination.total - pageOffset*perPage
+			expected = perPage
+			if remaining < expected {
+				expected = remaining
+			}
+			complete = len(rows) >= remaining
+		}
+		if len(rows) < expected {
+			return nil, fmt.Errorf("%w: page %d expected %d rows, got %d", ErrIncompletePage, pageID, expected, len(rows))
+		}
+		if !complete {
+			collected := pageOffset*perPage + len(rows)
+			return items, fmt.Errorf("%w: page %d collected %d of %d rows", ErrPaginationRequired, pageID, collected, pagination.total)
+		}
 	}
 	return items, nil
+}
+
+func readPagePagination(pageURL *url.URL, metadata paginationMetadata) (int, int, error) {
+	query, err := url.ParseQuery(pageURL.RawQuery)
+	if err != nil {
+		return 0, 0, fmt.Errorf("%w: malformed pagination query: %v", ErrInvalidPagination, err)
+	}
+	pageID := 1
+	if values, exists := query["pageID"]; exists {
+		pageID, err = positivePaginationValue("pageID", values)
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+	perPage := metadata.perPage
+	if values, exists := query["recPerPage"]; exists {
+		perPage, err = positivePaginationValue("recPerPage", values)
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+	if (metadata.hasPerPage || query.Has("recPerPage")) && perPage <= 0 {
+		return 0, 0, fmt.Errorf("%w: recPerPage must be positive", ErrInvalidPagination)
+	}
+	return pageID, perPage, nil
+}
+
+func positivePaginationValue(name string, values []string) (int, error) {
+	if len(values) != 1 {
+		return 0, fmt.Errorf("%w: %s must appear exactly once", ErrInvalidPagination, name)
+	}
+	value, err := strconv.Atoi(values[0])
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%w: %s must be a positive integer", ErrInvalidPagination, name)
+	}
+	return value, nil
 }
 
 func parseModernItem(row *html.Node, pageURL string, spec assignedSpec) (domain.Item, error) {

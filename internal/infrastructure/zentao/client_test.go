@@ -165,6 +165,12 @@ func TestFetchAssignedURLsAndCookiePersistence(t *testing.T) {
 					if r.Method != http.MethodGet {
 						t.Errorf("page method = %q, want GET", r.Method)
 					}
+					if got := r.URL.Query().Get("pageID"); got != "1" {
+						t.Errorf("pageID = %q, want 1", got)
+					}
+					if got := r.URL.Query().Get("recPerPage"); got != "100" {
+						t.Errorf("recPerPage = %q, want 100", got)
+					}
 					cookie, err := r.Cookie("zentaosid")
 					if err != nil || cookie.Value != "persisted-test-session" {
 						t.Errorf("session cookie = %v, %v; want persisted-test-session", cookie, err)

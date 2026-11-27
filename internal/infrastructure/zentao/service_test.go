@@ -29,21 +29,25 @@ func TestServiceAggregatesAllTaskAndBugPages(t *testing.T) {
 
 		switch r.URL.Path {
 		case "/biz/my-task-type=assignedTo.html":
+			firstPage := serviceTestItems(1, 100, "done")
+			firstPage[99] = serviceTestItem{ID: "100", Title: "第一页任务", Status: "wait"}
 			if pageID == "1" {
-				fmt.Fprint(w, serviceAssignedPage("task", 2, serviceTestItem{ID: "102", Title: "第二页任务", Status: "wait"}))
+				fmt.Fprint(w, serviceAssignedPage("task", 101, firstPage...))
 				return
 			}
 			if pageID == "2" {
-				fmt.Fprint(w, serviceAssignedPage("task", 1, serviceTestItem{ID: "101", Title: "第一页任务", Status: "doing"}))
+				fmt.Fprint(w, serviceAssignedPage("task", 101, serviceTestItem{ID: "101", Title: "第二页任务", Status: "doing"}))
 				return
 			}
 		case "/biz/my-bug-type=assignedTo.html":
+			firstPage := serviceTestItems(1, 100, "resolved")
+			firstPage[99] = serviceTestItem{ID: "100", Title: "第一页缺陷", Status: "active"}
 			if pageID == "1" {
-				fmt.Fprint(w, serviceAssignedPage("bug", 2, serviceTestItem{ID: "202", Title: "第二页缺陷", Status: "active"}))
+				fmt.Fprint(w, serviceAssignedPage("bug", 101, firstPage...))
 				return
 			}
 			if pageID == "2" {
-				fmt.Fprint(w, serviceAssignedPage("bug", 1, serviceTestItem{ID: "201", Title: "第一页缺陷", Status: "active"}))
+				fmt.Fprint(w, serviceAssignedPage("bug", 101, serviceTestItem{ID: "101", Title: "第二页缺陷", Status: "active"}))
 				return
 			}
 		}
@@ -64,7 +68,7 @@ func TestServiceAggregatesAllTaskAndBugPages(t *testing.T) {
 	for _, item := range items {
 		keys = append(keys, item.Key())
 	}
-	wantKeys := []string{"bug:201", "bug:202", "task:101", "task:102"}
+	wantKeys := []string{"bug:100", "bug:101", "task:100", "task:101"}
 	if !reflect.DeepEqual(keys, wantKeys) {
 		t.Fatalf("item keys = %v, want %v", keys, wantKeys)
 	}
@@ -81,6 +85,48 @@ func TestServiceAggregatesAllTaskAndBugPages(t *testing.T) {
 	}
 }
 
+func TestServiceRejectsIncompletePageWithConstantRecTotal(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if got := r.URL.Query().Get("recPerPage"); got != "100" {
+			t.Errorf("recPerPage = %q, want 100", got)
+		}
+		switch r.URL.Path {
+		case "/biz/my-task-type=assignedTo.html":
+			switch r.URL.Query().Get("pageID") {
+			case "1":
+				fmt.Fprint(w, serviceAssignedPage("task", 2, serviceTestItem{ID: "101", Title: "第一页任务", Status: "wait"}))
+				return
+			case "2":
+				fmt.Fprint(w, serviceAssignedPage("task", 2, serviceTestItem{ID: "102", Title: "第二页任务", Status: "doing"}))
+				return
+			}
+		case "/biz/my-bug-type=assignedTo.html":
+			fmt.Fprint(w, serviceAssignedPage("bug", 0))
+			return
+		}
+		t.Errorf("unexpected request after the complete second page: %s", r.URL.String())
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL+"/biz/", "test-user", "test-password")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	items, err := NewService(client).FetchAssignedItems(context.Background())
+	if items != nil {
+		t.Fatalf("items = %#v, want nil for an incomplete page", items)
+	}
+	if !errors.Is(err, ErrIncompletePage) || !strings.Contains(err.Error(), "page 1 expected 2 rows, got 1") {
+		t.Fatalf("error = %v, want an explicit incomplete-page error", err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Errorf("requests = %d, want 1 because page 1 is incomplete", got)
+	}
+}
+
 func TestServiceDiscardsPartialSnapshotOnLaterFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -88,7 +134,9 @@ func TestServiceDiscardsPartialSnapshotOnLaterFailure(t *testing.T) {
 			fmt.Fprint(w, serviceAssignedPage("task", 1, serviceTestItem{ID: "101", Title: "完整任务", Status: "wait"}))
 		case "/biz/my-bug-type=assignedTo.html":
 			if r.URL.Query().Get("pageID") == "1" {
-				fmt.Fprint(w, serviceAssignedPage("bug", 2, serviceTestItem{ID: "201", Title: "部分缺陷", Status: "active"}))
+				firstPage := serviceTestItems(1, 100, "resolved")
+				firstPage[99] = serviceTestItem{ID: "100", Title: "部分缺陷", Status: "active"}
+				fmt.Fprint(w, serviceAssignedPage("bug", 101, firstPage...))
 				return
 			}
 			http.Error(w, "failure", http.StatusInternalServerError)
@@ -118,7 +166,7 @@ func TestServiceStopsAfterMaximumPageCount(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/biz/my-task-type=assignedTo.html" {
 			taskRequests.Add(1)
-			fmt.Fprint(w, serviceAssignedPage("task", 2, serviceTestItem{ID: "101", Title: "持续分页的任务", Status: "wait"}))
+			fmt.Fprint(w, serviceAssignedPage("task", maxServicePages*serviceRecPerPage+1, serviceTestItems(1, serviceRecPerPage, "wait")...))
 			return
 		}
 		if r.URL.Path == "/biz/my-bug-type=assignedTo.html" {
@@ -155,11 +203,9 @@ func TestServiceIgnoresIdenticalDuplicateItems(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/biz/my-task-type=assignedTo.html":
-			total := 1
-			if r.URL.Query().Get("pageID") == "1" {
-				total = 2
-			}
-			fmt.Fprint(w, serviceAssignedPage("task", total, item))
+			firstPage := serviceTestItems(1, 100, "resolved")
+			firstPage[99] = item
+			fmt.Fprint(w, serviceAssignedPage("task", 101, firstPage...))
 		case "/biz/my-bug-type=assignedTo.html":
 			fmt.Fprint(w, serviceAssignedPage("bug", 0))
 		default:
@@ -194,10 +240,14 @@ func TestServiceRejectsConflictingDuplicateItems(t *testing.T) {
 			return
 		}
 		if r.URL.Query().Get("pageID") == "1" {
-			fmt.Fprint(w, serviceAssignedPage("task", 2, serviceTestItem{ID: "101", Title: "任务版本一", Status: "wait"}))
+			firstPage := serviceTestItems(1, 100, "resolved")
+			firstPage[99] = serviceTestItem{ID: "101", Title: "任务版本一", Status: "wait"}
+			fmt.Fprint(w, serviceAssignedPage("task", 101, firstPage...))
 			return
 		}
-		fmt.Fprint(w, serviceAssignedPage("task", 1, serviceTestItem{ID: "101", Title: "任务版本二", Status: "doing"}))
+		firstPage := serviceTestItems(1, 100, "resolved")
+		firstPage[99] = serviceTestItem{ID: "101", Title: "任务版本二", Status: "doing"}
+		fmt.Fprint(w, serviceAssignedPage("task", 101, firstPage...))
 	}))
 	defer server.Close()
 
@@ -245,6 +295,15 @@ type serviceTestItem struct {
 	ID     string
 	Title  string
 	Status string
+}
+
+func serviceTestItems(firstID, count int, status string) []serviceTestItem {
+	items := make([]serviceTestItem, count)
+	for index := range items {
+		id := fmt.Sprint(firstID + index)
+		items[index] = serviceTestItem{ID: id, Title: "列表项 " + id, Status: status}
+	}
+	return items
 }
 
 func serviceAssignedPage(itemType string, total int, items ...serviceTestItem) string {

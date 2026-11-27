@@ -1,0 +1,40 @@
+# NSGo build output and local tool state
+/dist/
+/.nsgo/
+
+# Local application state and logs
+/state.json
+*.log
+
+# Credentials and local environment files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+cookies.txt
+
+# Compiled binaries and archives
+/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.o
+*.test
+*.zip
+
+# Go test artifacts
+coverage.out
+*.prof
+
+# OS and editor cruft
+Thumbs.db
+Desktop.ini
+.DS_Store
+.idea/
+.vscode/

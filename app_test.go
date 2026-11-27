@@ -55,6 +55,31 @@ func TestAppStartsAndShowsLoginPanel(t *testing.T) {
 	}
 }
 
+func TestAppUsesMainViewWithoutDesktopWindow(t *testing.T) {
+	if nsgotest.Target() != "" {
+		t.Skip("uses a simulated windowless platform")
+	}
+
+	var appScope *core.Scope
+	app := nsgotest.StartApp(t, func(cx *core.Scope) {
+		appScope = cx
+		App(cx)
+	},
+		nsgotest.Size(390, 844),
+		nsgotest.Environment(core.Environment{OS: core.OSIOS, Idiom: core.IdiomPhone, Locale: "zh-CN"}),
+	)
+	app.Post(func() {
+		if appScope.MainWindow() != nil {
+			t.Fatal("windowless platform unexpectedly opened a main window")
+		}
+	})
+	app.Settle()
+	surface := app.Surface("index:0")
+	surface.Find("id:workbench")
+	surface.Find("id:login-panel")
+	surface.Find("text:请先登录禅道账号")
+}
+
 func TestSnapshotItemsSortsByStableKey(t *testing.T) {
 	items := map[string]domain.Item{
 		"bug:2":  {ID: "2", Type: domain.ItemBug, Title: "Bug"},

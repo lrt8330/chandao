@@ -49,7 +49,8 @@ func App(cx *core.Scope) {
 	if window == nil {
 		// Platforms without independent windows use their one main surface.
 		cx.SetMainView(workbench)
+	} else {
+		window.Show()
 	}
-	window.Show()
 	runtime.start()
 }

@@ -1,0 +1,30 @@
+package ui
+
+import (
+	"time"
+
+	"chandao/zentaotray/internal/domain"
+)
+
+// WorkbenchData is the presentation snapshot supplied by the application layer.
+type WorkbenchData struct {
+	Account              string
+	NeedsLogin           bool
+	Connected            bool
+	Loading              bool
+	LastSuccess          time.Time
+	ErrorMessage         string
+	Items                []domain.Item
+	Changes              []domain.Change
+	PollSeconds          int
+	NotificationsEnabled bool
+}
+
+// WorkbenchProps connects the workbench to application and platform actions.
+type WorkbenchProps struct {
+	Data       WorkbenchData
+	OnRefresh  func()
+	OnOpenURL  func(string)
+	OnLogin    func(account, password string)
+	OnSettings func(pollSeconds int, notificationsEnabled bool)
+}

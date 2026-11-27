@@ -12,12 +12,13 @@ import (
 	"github.com/nsgo-dev/nsgo/ui"
 )
 
-// Workbench renders the static Zentao dashboard and owns its local filters.
+// Workbench renders the Zentao dashboard and owns its local filters and dialogs.
 func Workbench(cx *core.Scope, props WorkbenchProps) core.Node {
 	cx.SetTheme(workbenchTheme())
 	colors := ui.ColorsOf(cx)
 	filter := core.NewSignal(cx, itemFilterAll)
 	changesOnly := core.NewSignal(cx, false)
+	settingsOpen := core.NewSignal(cx, false)
 	selection := ui.NewSelection(cx, false)
 	selectedKey := core.NewSignal(cx, "")
 	onSelectionChange := func(selection *ui.Selection) {
@@ -55,7 +56,8 @@ func Workbench(cx *core.Scope, props WorkbenchProps) core.Node {
 		},
 		StyleFunc: ui.Filled(colors.Background),
 		Children: []core.Node{
-			workbenchHeader(cx, props),
+			workbenchHeader(cx, props, settingsOpen),
+			settingsDialog(cx, props, settingsOpen),
 			core.Show{
 				When: func() bool { return strings.TrimSpace(props.Data.ErrorMessage) != "" },
 				Then: func(cx *core.Scope) core.Node { return errorBanner(cx, props.Data.ErrorMessage) },
@@ -78,7 +80,7 @@ func Workbench(cx *core.Scope, props WorkbenchProps) core.Node {
 			},
 			core.Show{
 				When: func() bool { return props.Data.NeedsLogin },
-				Then: loginPlaceholder,
+				Then: func(cx *core.Scope) core.Node { return loginPanel(cx, props) },
 				Else: func(cx *core.Scope) core.Node {
 					return core.Group{
 						workbenchFilters(cx, filter, changesOnly),
@@ -215,21 +217,6 @@ func workbenchList(cx *core.Scope, items func() []domain.Item, selection *ui.Sel
 	}
 }
 
-func loginPlaceholder(cx *core.Scope) core.Node {
-	colors := ui.ColorsOf(cx)
-	return core.View{
-		TestID: "login-placeholder",
-		Style:  core.Style{FlexGrow: 1, FlexShrink: 1, MinHeight: core.Pt(240), Padding: core.All(24), Gap: 8, AlignItems: core.AlignCenter, JustifyContent: core.JustifyCenter},
-		StyleFunc: func() core.Style {
-			return ui.FinOf(cx).Card().Over(core.Style{Background: colors.Surface(), BorderWidth: 1, BorderColor: colors.Border(), CornerRadius: ui.RadiusCard})
-		},
-		Children: []core.Node{
-			core.Text{Content: "请先登录禅道账号", Role: core.RoleHeader, Style: ui.TypeHeading},
-			core.Text{Content: "登录后即可查看分配给你的任务和 Bug", Style: ui.TypeBody, StyleFunc: ui.Colored(colors.Muted)},
-		},
-	}
-}
-
 func errorBanner(cx *core.Scope, message string) core.Node {
 	colors := ui.ColorsOf(cx)
 	return core.View{
@@ -290,7 +277,7 @@ func finishedStatus(status string) bool {
 	}
 }
 
-func workbenchHeader(cx *core.Scope, props WorkbenchProps) core.Node {
+func workbenchHeader(cx *core.Scope, props WorkbenchProps, settingsOpen *core.Signal[bool]) core.Node {
 	colors := ui.ColorsOf(cx)
 	account := strings.TrimSpace(props.Data.Account)
 	if account == "" {
@@ -330,7 +317,10 @@ func workbenchHeader(cx *core.Scope, props WorkbenchProps) core.Node {
 					core.Text{Content: lastSuccess, Style: ui.TypeCaption, StyleFunc: ui.Colored(colors.Muted)},
 				}},
 			}},
-			refresh,
+			core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 8, Wrap: core.Wrap}, Children: []core.Node{
+				settingsButton(settingsOpen),
+				refresh,
+			}},
 		},
 	}
 }

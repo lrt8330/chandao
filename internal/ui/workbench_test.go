@@ -12,17 +12,132 @@ import (
 
 func TestMain(m *testing.M) { nsgotest.Main(m) }
 
-func TestWorkbenchShowsLoginPlaceholder(t *testing.T) {
+func TestWorkbenchShowsLoginPanel(t *testing.T) {
 	app := startWorkbench(t, WorkbenchProps{Data: WorkbenchData{NeedsLogin: true, Items: testItems()}})
 
 	app.Find("text:未登录")
-	app.Find("id:login-placeholder")
+	app.Find("id:login-panel")
 	app.Find("text:请先登录禅道账号")
+	app.Find("id:login-account")
+	password := app.Find("id:login-password")
+	if !password.Input.Masked {
+		t.Fatal("login password is not masked")
+	}
+	if !app.Find("id:login-submit").Props.Disabled {
+		t.Fatal("login submit is enabled with empty credentials")
+	}
 	if app.Exists("id:item-list") || app.Exists("id:filter-all") {
 		t.Fatal("workbench controls are visible before login")
 	}
 	if !app.Find("id:refresh").Props.Disabled {
 		t.Fatal("refresh is enabled before login")
+	}
+}
+
+func TestWorkbenchLoginSubmitsAndClearsPassword(t *testing.T) {
+	const (
+		account  = "rt.liang"
+		password = "test-only-secret"
+	)
+	var gotAccount, gotPassword string
+	var calls int
+	app := startWorkbench(t, WorkbenchProps{
+		Data: WorkbenchData{NeedsLogin: true},
+		OnLogin: func(account, password string) {
+			calls++
+			gotAccount, gotPassword = account, password
+		},
+	})
+
+	app.Type("id:login-account", account)
+	app.Type("id:login-password", password)
+	if app.Find("id:login-submit").Props.Disabled {
+		t.Fatal("login submit is disabled with complete credentials")
+	}
+	assertPasswordNotRendered(t, app.Find("id:workbench"), password)
+	app.Press("id:login-submit")
+	if calls != 1 || gotAccount != account || gotPassword != password {
+		t.Fatal("login callback did not receive the entered credentials")
+	}
+	if got := app.Find("id:login-password").Text; got != "" {
+		t.Fatal("password was not cleared immediately after submission")
+	}
+	if got := app.Find("id:login-account").Text; got != account {
+		t.Fatalf("account after submission = %q, want %q", got, account)
+	}
+	if !app.Find("id:login-submit").Props.Disabled {
+		t.Fatal("login submit is enabled after the password was cleared")
+	}
+}
+
+func TestWorkbenchLoginClearsPasswordWithoutCallback(t *testing.T) {
+	app := startWorkbench(t, WorkbenchProps{Data: WorkbenchData{NeedsLogin: true}})
+	app.Type("id:login-account", "account")
+	app.Type("id:login-password", "test-only-secret")
+	app.Press("id:login-submit")
+	if got := app.Find("id:login-password").Text; got != "" {
+		t.Fatal("password was not cleared when OnLogin is nil")
+	}
+}
+
+func TestWorkbenchLoginSubmitDisabledUntilComplete(t *testing.T) {
+	for _, tc := range []struct {
+		name, account, password string
+		loading                 bool
+	}{
+		{name: "empty"},
+		{name: "account only", account: "account"},
+		{name: "password only", password: "test-only-secret"},
+		{name: "blank account", account: "   ", password: "test-only-secret"},
+		{name: "loading", account: "account", password: "test-only-secret", loading: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls int
+			app := startWorkbench(t, WorkbenchProps{
+				Data: WorkbenchData{NeedsLogin: true, Loading: tc.loading},
+				OnLogin: func(string, string) {
+					calls++
+				},
+			})
+			if tc.account != "" {
+				app.Type("id:login-account", tc.account)
+			}
+			if tc.password != "" {
+				app.Type("id:login-password", tc.password)
+			}
+			if !app.Find("id:login-submit").Props.Disabled {
+				t.Fatal("login submit is enabled while submission is unavailable")
+			}
+			app.Submit("id:login-password")
+			if calls != 0 {
+				t.Fatal("unavailable login submission called OnLogin")
+			}
+		})
+	}
+}
+
+func TestWorkbenchLoginShowsErrorAndFitsNarrowScreen(t *testing.T) {
+	app := startWorkbench(t, WorkbenchProps{Data: WorkbenchData{
+		NeedsLogin: true, ErrorMessage: "账号或密码不正确，请重试",
+	}}, nsgotest.Size(390, 844), nsgotest.Environment(core.Environment{
+		OS: core.OSWindows, Idiom: core.IdiomPhone, Locale: "zh-CN",
+	}))
+
+	banner := app.Find("id:error-banner")
+	if banner.Props.Role != core.RoleAlert {
+		t.Fatalf("login error role = %v, want alert", banner.Props.Role)
+	}
+	app.Find("text:账号或密码不正确，请重试")
+	panel := app.Find("id:login-panel")
+	if panel.Frame.Size.Width > 390 {
+		t.Fatalf("login panel width = %v, exceeds the window", panel.Frame.Size.Width)
+	}
+	for _, id := range []string{"login-account", "login-password", "login-submit"} {
+		field := app.Find("id:" + id)
+		bounds := field.Bounds()
+		if bounds.Origin.X+core.Points(field.Frame.Size.Width) > 390 {
+			t.Errorf("%s extends beyond the narrow window", id)
+		}
 	}
 }
 
@@ -293,6 +408,178 @@ func TestWorkbenchShowsHeaderAndKPIs(t *testing.T) {
 	app.Press("id:refresh")
 	if !refreshed {
 		t.Fatal("refresh callback was not called")
+	}
+}
+
+func TestWorkbenchSettingsOpensAndCloses(t *testing.T) {
+	var calls int
+	app := startWorkbench(t, WorkbenchProps{
+		Data:       WorkbenchData{Connected: true, PollSeconds: 60, NotificationsEnabled: true},
+		OnSettings: func(int, bool) { calls++ },
+	})
+
+	if app.Exists("id:settings-dialog") {
+		t.Fatal("settings dialog is visible before it is opened")
+	}
+	app.Find("id:open-settings")
+	app.Press("id:open-settings")
+	dialog := app.Find("id:settings-dialog")
+	if dialog.Props.Role != core.RoleDialog {
+		t.Fatalf("settings role = %v, want dialog", dialog.Props.Role)
+	}
+	if dialog.Style.Background != core.RGB(0xFFFFFF) || dialog.Style.BorderColor != core.RGB(0xDCE6F2) {
+		t.Fatalf("settings background/border = %x/%x, want FFFFFF/DCE6F2", dialog.Style.Background, dialog.Style.BorderColor)
+	}
+	if got := app.Find("id:poll-seconds").Text; got != "60" {
+		t.Fatalf("poll seconds = %q, want 60", got)
+	}
+	if !app.Find("id:notifications-enabled").Props.Checked {
+		t.Fatal("notifications switch is not prefilled")
+	}
+
+	app.Clear("id:poll-seconds")
+	app.Type("id:poll-seconds", "99")
+	app.Press("id:notifications-enabled")
+	app.Press("id:cancel-settings")
+	app.WaitForGone("id:settings-dialog", time.Second)
+	if calls != 0 {
+		t.Fatal("cancel called OnSettings")
+	}
+
+	app.Press("id:open-settings")
+	if got := app.Find("id:poll-seconds").Text; got != "60" {
+		t.Fatalf("poll seconds after reopening = %q, want 60", got)
+	}
+	if !app.Find("id:notifications-enabled").Props.Checked {
+		t.Fatal("cancelled notification change survived reopening")
+	}
+	app.Key("escape")
+	app.WaitForGone("id:settings-dialog", time.Second)
+	if calls != 0 {
+		t.Fatal("closing with Escape called OnSettings")
+	}
+}
+
+func TestWorkbenchSettingsSavesValidValues(t *testing.T) {
+	for _, seconds := range []int{30, 120, 300} {
+		t.Run(strconv.Itoa(seconds), func(t *testing.T) {
+			var gotSeconds int
+			var gotNotifications bool
+			var calls int
+			app := startWorkbench(t, WorkbenchProps{
+				Data: WorkbenchData{Connected: true, PollSeconds: 60, NotificationsEnabled: true},
+				OnSettings: func(pollSeconds int, notificationsEnabled bool) {
+					calls++
+					gotSeconds = pollSeconds
+					gotNotifications = notificationsEnabled
+				},
+			})
+			app.Press("id:open-settings")
+			app.Clear("id:poll-seconds")
+			app.Type("id:poll-seconds", strconv.Itoa(seconds))
+			app.Press("id:notifications-enabled")
+			app.Press("id:save-settings")
+			app.WaitForGone("id:settings-dialog", time.Second)
+			if calls != 1 || gotSeconds != seconds || gotNotifications {
+				t.Fatalf("settings callback calls/values = %d/%d/%t, want 1/%d/false", calls, gotSeconds, gotNotifications, seconds)
+			}
+		})
+	}
+}
+
+func TestWorkbenchSettingsRejectsInvalidPollValues(t *testing.T) {
+	for _, value := range []string{"29", "301", "abc", "30.5", "", "999999999999999999999999"} {
+		t.Run("poll_"+value, func(t *testing.T) {
+			var calls int
+			app := startWorkbench(t, WorkbenchProps{
+				Data:       WorkbenchData{Connected: true, PollSeconds: 60, NotificationsEnabled: true},
+				OnSettings: func(int, bool) { calls++ },
+			})
+			app.Press("id:open-settings")
+			app.Clear("id:poll-seconds")
+			if value != "" {
+				app.Type("id:poll-seconds", value)
+			}
+			app.Press("id:save-settings")
+			if calls != 0 {
+				t.Fatal("invalid poll value called OnSettings")
+			}
+			if !app.Exists("id:settings-dialog") {
+				t.Fatal("settings dialog closed after invalid input")
+			}
+			if !app.Find("id:poll-seconds").Props.Invalid {
+				t.Fatal("poll input is not marked invalid")
+			}
+			errorBanner := app.Find("id:settings-error")
+			if errorBanner.Props.Role != core.RoleAlert {
+				t.Fatalf("validation error role = %v, want alert", errorBanner.Props.Role)
+			}
+			app.Find("text:" + pollErrorText)
+
+			app.Clear("id:poll-seconds")
+			app.Type("id:poll-seconds", "90")
+			if app.Exists("id:settings-error") {
+				t.Fatal("validation error remains after correcting the input")
+			}
+			app.Press("id:save-settings")
+			app.WaitForGone("id:settings-dialog", time.Second)
+			if calls != 1 {
+				t.Fatalf("OnSettings calls after correction = %d, want 1", calls)
+			}
+		})
+	}
+}
+
+func TestWorkbenchSettingsNotificationsToggle(t *testing.T) {
+	for _, initial := range []bool{false, true} {
+		t.Run(strconv.FormatBool(initial), func(t *testing.T) {
+			app := startWorkbench(t, WorkbenchProps{Data: WorkbenchData{
+				Connected: true, PollSeconds: 45, NotificationsEnabled: initial,
+			}})
+			app.Press("id:open-settings")
+			toggle := app.Find("id:notifications-enabled")
+			if toggle.Props.Checked != initial {
+				t.Fatalf("initial notifications state = %v, want %v", toggle.Props.Checked, initial)
+			}
+			app.Press("id:notifications-enabled")
+			if got := app.Find("id:notifications-enabled").Props.Checked; got == initial {
+				t.Fatal("notifications switch did not toggle")
+			}
+			app.Press("id:cancel-settings")
+			app.WaitForGone("id:settings-dialog", time.Second)
+		})
+	}
+}
+
+func TestWorkbenchSettingsFitNarrowScreen(t *testing.T) {
+	app := startWorkbench(t, WorkbenchProps{Data: WorkbenchData{
+		Connected: true, PollSeconds: 60, NotificationsEnabled: true,
+	}}, nsgotest.Size(390, 844), nsgotest.Environment(core.Environment{
+		OS: core.OSWindows, Idiom: core.IdiomPhone, Locale: "zh-CN",
+	}))
+
+	app.Press("id:open-settings")
+	if got := app.Find("id:settings-dialog").Frame.Size.Width; got > 390 {
+		t.Fatalf("narrow settings dialog width = %v, exceeds the window", got)
+	}
+	for _, id := range []string{"poll-seconds", "notifications-enabled", "cancel-settings", "save-settings"} {
+		control := app.Find("id:" + id)
+		bounds := control.Bounds()
+		if bounds.Origin.X+core.Points(control.Frame.Size.Width) > 390 {
+			t.Errorf("%s extends beyond the narrow window", id)
+		}
+	}
+	app.Press("id:cancel-settings")
+	app.WaitForGone("id:settings-dialog", time.Second)
+}
+
+func assertPasswordNotRendered(t *testing.T, view *nsgotest.View, password string) {
+	t.Helper()
+	if view.Kind == nsgotest.KindText && view.Text == password {
+		t.Fatal("password is rendered in a text node")
+	}
+	for _, child := range view.Children {
+		assertPasswordNotRendered(t, child, password)
 	}
 }
 

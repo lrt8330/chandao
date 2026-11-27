@@ -428,7 +428,7 @@ func TestWorkbenchUsesExternalSelectedKey(t *testing.T) {
 	}
 }
 
-func TestWorkbenchDataFuncUpdatesLoginAndSettings(t *testing.T) {
+func TestWorkbenchDataFuncUpdatesLoginAndRefreshesSettingsOnOpen(t *testing.T) {
 	initial := WorkbenchData{
 		NeedsLogin:           true,
 		PollSeconds:          60,
@@ -473,16 +473,49 @@ func TestWorkbenchDataFuncUpdatesLoginAndSettings(t *testing.T) {
 	if app.Find("id:notifications-enabled").Props.Checked {
 		t.Fatal("reactive notifications setting is still enabled")
 	}
+	app.Clear("id:poll-seconds")
+	app.Type("id:poll-seconds", "99")
+	app.Press("id:notifications-enabled")
 
 	connected.PollSeconds = 120
-	connected.NotificationsEnabled = true
 	app.Post(func() { data.Set(connected) })
 	app.Settle()
-	if got := app.Find("id:poll-seconds").Text; got != "120" {
-		t.Fatalf("updated poll seconds = %q, want 120", got)
+	if got := app.Find("id:poll-seconds").Text; got != "99" {
+		t.Errorf("poll seconds after refresh = %q, want unsaved draft 99", got)
 	}
 	if !app.Find("id:notifications-enabled").Props.Checked {
-		t.Fatal("notifications setting did not react to the data update")
+		t.Error("unsaved notifications draft was overwritten by the data refresh")
+	}
+
+	app.Press("id:cancel-settings")
+	app.WaitForGone("id:settings-dialog", time.Second)
+	app.Press("id:open-settings")
+	if got := app.Find("id:poll-seconds").Text; got != "120" {
+		t.Errorf("poll seconds after reopening = %q, want latest value 120", got)
+	}
+	if app.Find("id:notifications-enabled").Props.Checked {
+		t.Error("notifications setting did not reset to the latest value after reopening")
+	}
+}
+
+func TestSettingsDialogInitializesDraftOnProgrammaticOpen(t *testing.T) {
+	var open *core.Signal[bool]
+	app := nsgotest.Start(t, func(cx *core.Scope) core.Node {
+		open = core.NewSignal(cx, false)
+		data := core.NewSignalFunc(cx, WorkbenchData{PollSeconds: 75, NotificationsEnabled: true}, nil)
+		return core.View{Style: core.Style{FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0), MinHeight: core.Pt(0)}, Children: []core.Node{
+			settingsDialog(cx, WorkbenchProps{DataFunc: data.Get}, open),
+		}}
+	}, workbenchTestOptions()...)
+
+	app.Post(func() { open.Set(true) })
+	app.Settle()
+	app.Find("id:settings-dialog")
+	if got := app.Find("id:poll-seconds").Text; got != "75" {
+		t.Fatalf("poll seconds on programmatic open = %q, want 75", got)
+	}
+	if !app.Find("id:notifications-enabled").Props.Checked {
+		t.Fatal("notifications draft was not initialized on programmatic open")
 	}
 }
 

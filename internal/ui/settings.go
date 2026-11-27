@@ -40,13 +40,21 @@ func settingsDialog(cx *core.Scope, props WorkbenchProps, open *core.Signal[bool
 		close()
 	}
 
+	wasOpen := false
 	cx.Effect(func() {
-		if open.Get() {
-			data := props.data()
-			pollText.Set(strconv.Itoa(data.PollSeconds))
-			notifications.Set(data.NotificationsEnabled)
-			validationError.Set("")
+		shown := open.Get()
+		if !shown {
+			wasOpen = false
+			return
 		}
+		if wasOpen {
+			return
+		}
+		wasOpen = true
+		data := props.data()
+		pollText.Set(strconv.Itoa(data.PollSeconds))
+		notifications.Set(data.NotificationsEnabled)
+		validationError.Set("")
 	})
 
 	return ui.Dialog{

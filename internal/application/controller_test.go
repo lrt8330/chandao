@@ -26,6 +26,26 @@ type fakeGateway struct {
 	fetchCalls    int
 	fetchStarted  chan struct{}
 	fetchContinue chan struct{}
+
+	actionCalls    int
+	actionErrs     []error
+	lastActionItem domain.Item
+	lastAction     string
+}
+
+// RunItemAction 记录调用并按预设错误序列返回。
+func (g *fakeGateway) RunItemAction(ctx context.Context, itemType domain.ItemType, id, action string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.actionCalls++
+	g.lastActionItem = domain.Item{ID: id, Type: itemType}
+	g.lastAction = action
+	if len(g.actionErrs) > 0 {
+		err := g.actionErrs[0]
+		g.actionErrs = g.actionErrs[1:]
+		return err
+	}
+	return nil
 }
 
 func (g *fakeGateway) Login(ctx context.Context) error {
@@ -843,5 +863,46 @@ func TestLargeAccountReconcileThrottledByTime(t *testing.T) {
 	}
 	if saved, _ := storeB.state(); saved.LastReconcile.IsZero() {
 		t.Fatal("lastReconcile not persisted after reconciliation")
+	}
+}
+
+// TestControllerRunsItemActionWithSessionRetry 会话过期时重登录并重试一次。
+func TestControllerRunsItemActionWithSessionRetry(t *testing.T) {
+	store := &fakeStore{snapshot: application.DefaultSnapshot()}
+	gateway := &fakeGateway{
+		loginErrors: []error{nil},
+		actionErrs:  []error{application.ErrSessionExpired},
+	}
+	controller, err := application.NewController(context.Background(), gateway, store, nil)
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+	if err := controller.RunItemAction(context.Background(), domain.Item{ID: "108", Type: domain.ItemTask}, "start"); err != nil {
+		t.Fatalf("RunItemAction: %v", err)
+	}
+	if gateway.loginCalls != 2 { // 首次登录 + 过期后重登录
+		t.Errorf("login calls = %d, want 2", gateway.loginCalls)
+	}
+	if gateway.actionCalls != 2 {
+		t.Errorf("action calls = %d, want 2 (one retry)", gateway.actionCalls)
+	}
+	if gateway.lastAction != "start" || gateway.lastActionItem.ID != "108" {
+		t.Errorf("last action = %s %v", gateway.lastAction, gateway.lastActionItem)
+	}
+}
+
+// TestControllerRunsItemActionWithoutLogin 首次调用前会先登录。
+func TestControllerRunsItemActionWithoutLogin(t *testing.T) {
+	store := &fakeStore{snapshot: application.DefaultSnapshot()}
+	gateway := &fakeGateway{}
+	controller, err := application.NewController(context.Background(), gateway, store, nil)
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+	if err := controller.RunItemAction(context.Background(), domain.Item{ID: "6", Type: domain.ItemBug}, "resolve"); err != nil {
+		t.Fatalf("RunItemAction: %v", err)
+	}
+	if gateway.loginCalls != 1 {
+		t.Errorf("login calls = %d, want 1", gateway.loginCalls)
 	}
 }

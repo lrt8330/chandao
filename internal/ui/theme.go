@@ -26,6 +26,8 @@ const (
 	cloudDanger      = 0xBD5548
 	bugSoftFill      = 0xF7E7E4
 	bugSoftLine      = 0xEFC9C3
+	storySoftFill    = 0xE8F6EF
+	storySoftLine    = 0xBFDFD0
 
 	// Serif 是大数字与金额的衬线族；Mono 是 kicker、代号与时间戳的等宽族。
 	Serif = "Georgia, serif"

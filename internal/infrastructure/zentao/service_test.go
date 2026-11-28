@@ -50,6 +50,9 @@ func TestServiceAggregatesAllTaskAndBugPages(t *testing.T) {
 				fmt.Fprint(w, serviceAssignedPage("bug", 101, serviceTestItem{ID: "101", Title: "第二页缺陷", Status: "active"}))
 				return
 			}
+		case isServiceAssignedRequest(r, "story"):
+			fmt.Fprint(w, serviceAssignedPage("story", 0))
+			return
 		}
 		t.Errorf("unexpected request: %s", r.URL.String())
 		http.NotFound(w, r)
@@ -79,6 +82,7 @@ func TestServiceAggregatesAllTaskAndBugPages(t *testing.T) {
 		"/biz/index.php?m=my&f=task&browseType=assignedTo&param=0&orderBy=id_desc&recTotal=0&recPerPage=100&pageID=2",
 		"/biz/index.php?m=my&f=bug&browseType=assignedTo&param=0&orderBy=id_desc&recTotal=0&recPerPage=100&pageID=1",
 		"/biz/index.php?m=my&f=bug&browseType=assignedTo&param=0&orderBy=id_desc&recTotal=0&recPerPage=100&pageID=2",
+		"/biz/index.php?m=my&f=story&browseType=assignedTo&param=0&orderBy=id_desc&recTotal=0&recPerPage=100&pageID=1",
 	}
 	if !reflect.DeepEqual(requests, wantRequests) {
 		t.Fatalf("requests = %v, want %v", requests, wantRequests)
@@ -104,6 +108,9 @@ func TestServiceRejectsIncompletePageWithConstantRecTotal(t *testing.T) {
 			}
 		case isServiceAssignedRequest(r, "bug"):
 			fmt.Fprint(w, serviceAssignedPage("bug", 0))
+			return
+		case isServiceAssignedRequest(r, "story"):
+			fmt.Fprint(w, serviceAssignedPage("story", 0))
 			return
 		}
 		t.Errorf("unexpected request after the complete second page: %s", r.URL.String())
@@ -208,6 +215,8 @@ func TestServiceIgnoresIdenticalDuplicateItems(t *testing.T) {
 			fmt.Fprint(w, serviceAssignedPage("task", 101, firstPage...))
 		case isServiceAssignedRequest(r, "bug"):
 			fmt.Fprint(w, serviceAssignedPage("bug", 0))
+		case isServiceAssignedRequest(r, "story"):
+			fmt.Fprint(w, serviceAssignedPage("story", 0))
 		default:
 			t.Errorf("unexpected request: %s", r.URL.String())
 			http.NotFound(w, r)
@@ -232,6 +241,10 @@ func TestServiceRejectsConflictingDuplicateItems(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isServiceAssignedRequest(r, "bug") {
 			fmt.Fprint(w, serviceAssignedPage("bug", 0))
+			return
+		}
+		if isServiceAssignedRequest(r, "story") {
+			fmt.Fprint(w, serviceAssignedPage("story", 0))
 			return
 		}
 		if !isServiceAssignedRequest(r, "task") {

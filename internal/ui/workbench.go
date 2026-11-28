@@ -66,6 +66,7 @@ func Workbench(cx *core.Scope, props WorkbenchProps) core.Node {
 	}, slices.Equal)
 	kpis := core.NewMemo(cx, func() kpiCounts { return workbenchKPIs(props.data()) })
 
+	actions := newItemActionController(cx)
 	return core.View{
 		TestID: "workbench",
 		Style: core.Style{
@@ -77,6 +78,7 @@ func Workbench(cx *core.Scope, props WorkbenchProps) core.Node {
 			settingsDialog(cx, props, settingsOpen),
 			notificationHistoryDialog(cx, props.NotifyHistory, notifyHistoryOpen),
 			commandDialog(cx, props, settingsOpen, notifyHistoryOpen, changesOnly, paletteOpen),
+			actions.confirmDialog(cx, props),
 			core.Show{
 				When: func() bool { return strings.TrimSpace(props.data().ErrorMessage) != "" },
 				Then: func(cx *core.Scope) core.Node {
@@ -88,7 +90,7 @@ func Workbench(cx *core.Scope, props WorkbenchProps) core.Node {
 				When: func() bool { return props.data().NeedsLogin },
 				Then: func(cx *core.Scope) core.Node { return loginPanel(cx, props) },
 				Else: func(cx *core.Scope) core.Node {
-					return workbenchBody(cx, props, listEntries.Get, selection, onSelectionChange, selectedKey, filter, changesOnly)
+					return workbenchBody(cx, props, listEntries.Get, selection, onSelectionChange, selectedKey, filter, changesOnly, actions)
 				},
 			},
 		},
@@ -110,9 +112,10 @@ func workbenchCanvas(cx *core.Scope) func() core.Style {
 type itemFilter string
 
 const (
-	itemFilterAll  itemFilter = "all"
-	itemFilterTask itemFilter = "task"
-	itemFilterBug  itemFilter = "bug"
+	itemFilterAll   itemFilter = "all"
+	itemFilterTask  itemFilter = "task"
+	itemFilterStory itemFilter = "story"
+	itemFilterBug   itemFilter = "bug"
 )
 
 func workbenchFilters(cx *core.Scope, filter *core.Signal[itemFilter], changesOnly *core.Signal[bool]) core.Node {
@@ -123,6 +126,7 @@ func workbenchFilters(cx *core.Scope, filter *core.Signal[itemFilter], changesOn
 			Options: []ui.Option[itemFilter]{
 				{Value: itemFilterAll, Label: "全部", TestID: "filter-all"},
 				{Value: itemFilterTask, Label: "任务", TestID: "filter-task"},
+				{Value: itemFilterStory, Label: "需求", TestID: "filter-story"},
 				{Value: itemFilterBug, Label: "Bug", TestID: "filter-bug"},
 			},
 		},
@@ -133,7 +137,7 @@ func workbenchFilters(cx *core.Scope, filter *core.Signal[itemFilter], changesOn
 	}}
 }
 
-func workbenchBody(cx *core.Scope, props WorkbenchProps, entries func() []listEntry, selection *ui.Selection, onSelectionChange func(*ui.Selection), selectedKey *core.Signal[string], filter *core.Signal[itemFilter], changesOnly *core.Signal[bool]) core.Node {
+func workbenchBody(cx *core.Scope, props WorkbenchProps, entries func() []listEntry, selection *ui.Selection, onSelectionChange func(*ui.Selection), selectedKey *core.Signal[string], filter *core.Signal[itemFilter], changesOnly *core.Signal[bool], actions *itemActionController) core.Node {
 	selectedItem := func() domain.Item {
 		for _, item := range props.data().Items {
 			if item.Key() == selectedKey.Get() {
@@ -156,7 +160,7 @@ func workbenchBody(cx *core.Scope, props WorkbenchProps, entries func() []listEn
 				Style: core.Style{FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0), MinHeight: core.Pt(0)},
 				Children: []core.Node{
 					list,
-					itemDetailDialog(cx, selectedItem, props.OnOpenURL, selection, selectedKey),
+					itemDetailDialog(cx, selectedItem, props.OnOpenURL, selection, selectedKey, actions),
 				},
 			}
 		}
@@ -166,7 +170,7 @@ func workbenchBody(cx *core.Scope, props WorkbenchProps, entries func() []listEn
 				list,
 				core.Show{
 					When: func() bool { return selectedKey.Get() != "" },
-					Then: func(cx *core.Scope) core.Node { return itemDetailPane(cx, selectedItem, props.OnOpenURL) },
+					Then: func(cx *core.Scope) core.Node { return itemDetailPane(cx, selectedItem, props.OnOpenURL, actions) },
 					Else: detailPlaceholder,
 				},
 			},
@@ -373,6 +377,9 @@ func typePill(cx *core.Scope, itemType domain.ItemType) core.Node {
 	if itemType == domain.ItemBug {
 		fill, line, ink = core.RGB(bugSoftFill), core.RGB(bugSoftLine), core.RGB(cloudDanger)
 	}
+	if itemType == domain.ItemStory {
+		fill, line, ink = core.RGB(storySoftFill), core.RGB(storySoftLine), core.RGB(cloudSuccess)
+	}
 	return core.View{
 		Style:     core.Style{Padding: core.Symmetric(2, 8), CornerRadius: 6, BorderWidth: 1, FlexShrink: 0},
 		StyleFunc: func() core.Style { return core.Style{Background: fill, BorderColor: line} },
@@ -384,7 +391,7 @@ func typePill(cx *core.Scope, itemType domain.ItemType) core.Node {
 }
 
 type kpiCounts struct {
-	tasks, bugs, added, statusChanges int
+	tasks, bugs, stories, added, statusChanges int
 }
 
 func workbenchKPIs(data WorkbenchData) kpiCounts {
@@ -398,6 +405,10 @@ func workbenchKPIs(data WorkbenchData) kpiCounts {
 		case domain.ItemBug:
 			if !finishedStatus(item.Status) {
 				counts.bugs++
+			}
+		case domain.ItemStory:
+			if !finishedStatus(item.Status) {
+				counts.stories++
 			}
 		}
 	}
@@ -547,12 +558,12 @@ func monoCap(cx *core.Scope, content string, colored func() core.Color) core.Nod
 
 func todoAnchorCard(cx *core.Scope, kpis func() kpiCounts) core.Node {
 	colors := ui.ColorsOf(cx)
-	open := func() int { return kpis().tasks + kpis().bugs }
+	open := func() int { return kpis().tasks + kpis().bugs + kpis().stories }
 	return core.View{Style: core.Style{Gap: 8}, Children: []core.Node{
 		core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 6}, Children: []core.Node{
 			monoCap(cx, "我的待办", colors.Muted),
 			ui.Tooltip{
-				Text: "当前指派给我、尚未关闭的任务与 Bug 总数",
+				Text: "当前指派给我、尚未关闭的任务、需求与 Bug 总数",
 				Trigger: core.Icon{SVG: lucide.Info(), Label: "说明",
 					Style: core.Style{FontSize: 13}, StyleFunc: ui.Colored(colors.Faint)},
 			},
@@ -564,6 +575,7 @@ func todoAnchorCard(cx *core.Scope, kpis func() kpiCounts) core.Node {
 		},
 		core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 14, Wrap: core.Wrap}, Children: []core.Node{
 			anchorStat(cx, "未完成任务", func() int { return kpis().tasks }, "kpi-tasks-value"),
+			anchorStat(cx, "需求", func() int { return kpis().stories }, "kpi-stories-value"),
 			anchorStat(cx, "未解决 Bug", func() int { return kpis().bugs }, "kpi-bugs-value"),
 		}},
 	}}
@@ -745,8 +757,11 @@ func formatUpdatedAt(value string) string {
 }
 
 func itemTypeLabel(itemType domain.ItemType) string {
-	if itemType == domain.ItemBug {
+	switch itemType {
+	case domain.ItemBug:
 		return "Bug"
+	case domain.ItemStory:
+		return "需求"
 	}
 	return "任务"
 }

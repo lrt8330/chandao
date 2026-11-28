@@ -8,7 +8,7 @@ import (
 	"github.com/nsgo-dev/nsgo/ui"
 )
 
-func itemDetailPane(cx *core.Scope, item func() domain.Item, onOpenURL func(string)) core.Node {
+func itemDetailPane(cx *core.Scope, item func() domain.Item, onOpenURL func(string), actions *itemActionController) core.Node {
 	colors := ui.ColorsOf(cx)
 	return core.View{
 		TestID: "item-detail",
@@ -32,12 +32,13 @@ func itemDetailPane(cx *core.Scope, item func() domain.Item, onOpenURL func(stri
 				ContentStyle: core.Style{Gap: 14, Padding: core.Edges{Right: 4}},
 				Children:     []core.Node{itemDetailBody(cx, item)},
 			},
+			actions.bar(cx, item),
 			openZentaoButton(item, onOpenURL),
 		},
 	}
 }
 
-func itemDetailDialog(cx *core.Scope, item func() domain.Item, onOpenURL func(string), selection *ui.Selection, selectedKey *core.Signal[string]) core.Node {
+func itemDetailDialog(cx *core.Scope, item func() domain.Item, onOpenURL func(string), selection *ui.Selection, selectedKey *core.Signal[string], actions *itemActionController) core.Node {
 	close := func() {
 		selection.Clear()
 		selectedKey.Set("")
@@ -54,6 +55,7 @@ func itemDetailDialog(cx *core.Scope, item func() domain.Item, onOpenURL func(st
 		Style:     dialogChrome(cx),
 		Children:  []core.Node{itemDetailBody(cx, item)},
 		Footer: []core.Node{
+			actions.bar(cx, item),
 			ui.Button{Text: "关闭", TestID: "close-item-detail", Variant: ui.ButtonOutline, OnPress: close},
 			openZentaoButton(item, onOpenURL),
 		},

@@ -50,14 +50,15 @@ func mountWorkbench(cx *core.Scope) *workbenchRuntime {
 	runtime := newWorkbenchRuntime(cx, data, selectedKey, showWindow, history)
 	workbench := func(windowCx *core.Scope) core.Node {
 		return ui.Workbench(windowCx, ui.WorkbenchProps{
-			DataFunc:      data.Get,
-			SelectedKey:   selectedKey,
-			OnLogin:       runtime.login,
-			OnRefresh:     runtime.refresh,
-			OnSettings:    runtime.updateSettings,
-			OnOpenURL:     runtime.openURL,
-			OnOpenReport:  runtime.openReport,
-			NotifyHistory: history,
+			DataFunc:        data.Get,
+			SelectedKey:     selectedKey,
+			OnLogin:         runtime.login,
+			OnRefresh:       runtime.refresh,
+			OnSettings:      runtime.updateSettings,
+			OnOpenURL:       runtime.openURL,
+			OnOpenReport:    runtime.openReport,
+			OnRunItemAction: runtime.runItemAction,
+			NotifyHistory:   history,
 		})
 	}
 

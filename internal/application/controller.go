@@ -344,3 +344,35 @@ func (c *Controller) fetchAllAssigned(ctx context.Context) ([]domain.Item, error
 	}
 	return items, nil
 }
+
+// RunItemAction 对一条事项执行生命周期操作（开始/完成/解决/关闭等）。
+// 会话过期时重新登录并重试一次；成功后由调用方触发刷新以反映最新状态。
+func (c *Controller) RunItemAction(ctx context.Context, item domain.Item, action string) error {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !c.loggedIn {
+		if err := c.gateway.Login(ctx); err != nil {
+			return fmt.Errorf("login: %w", err)
+		}
+		c.loggedIn = true
+	}
+	err := c.gateway.RunItemAction(ctx, item.Type, item.ID, action)
+	if errors.Is(err, ErrSessionExpired) {
+		c.loggedIn = false
+		if err := c.gateway.Login(ctx); err != nil {
+			return fmt.Errorf("re-login: %w", err)
+		}
+		c.loggedIn = true
+		err = c.gateway.RunItemAction(ctx, item.Type, item.ID, action)
+		if errors.Is(err, ErrSessionExpired) {
+			c.loggedIn = false
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("run %s %s: %w", item.Key(), action, err)
+	}
+	return nil
+}

@@ -133,10 +133,29 @@ func (c *Client) FetchAssignedBugsPage(ctx context.Context, pageID, recPerPage i
 	return c.fetchAssignedPage(ctx, assignedPagePath("bug", pageID, recPerPage))
 }
 
+// FetchAssignedStories returns the raw first page of the current user's assigned stories.
+func (c *Client) FetchAssignedStories(ctx context.Context) ([]byte, error) {
+	return c.FetchAssignedStoriesPage(ctx, 1, defaultRecPerPage)
+}
+
+// FetchAssignedStoriesPage returns one raw page of the current user's assigned stories.
+func (c *Client) FetchAssignedStoriesPage(ctx context.Context, pageID, recPerPage int) ([]byte, error) {
+	if pageID <= 0 || recPerPage <= 0 {
+		return nil, ErrInvalidPagination
+	}
+	return c.fetchAssignedPage(ctx, assignedPagePath("story", pageID, recPerPage))
+}
+
 // FetchAssignedPage 返回一页按指定排序的当前用户指派事项原始数据。
-// orderBy 仅允许禅道支持的排序关键字，避免拼接进查询串。
+// objectType 仅允许任务/Bug/需求，orderBy 仅允许禅道支持的排序关键字，
+// 避免拼接进查询串。
 func (c *Client) FetchAssignedPage(ctx context.Context, objectType string, pageID, recPerPage int, orderBy string) ([]byte, error) {
 	if pageID <= 0 || recPerPage <= 0 {
+		return nil, ErrInvalidPagination
+	}
+	switch objectType {
+	case "task", "bug", "story":
+	default:
 		return nil, ErrInvalidPagination
 	}
 	switch orderBy {
@@ -148,19 +167,11 @@ func (c *Client) FetchAssignedPage(ctx context.Context, objectType string, pageI
 }
 
 func assignedPagePathOrdered(objectType, orderBy string, pageID, recPerPage int) string {
-	method := objectType
-	if objectType != "bug" {
-		method = "task"
-	}
-	return fmt.Sprintf("index.php?m=my&f=%s&browseType=assignedTo&param=0&orderBy=%s&recTotal=0&recPerPage=%d&pageID=%d", method, url.QueryEscape(orderBy), recPerPage, pageID)
+	return fmt.Sprintf("index.php?m=my&f=%s&browseType=assignedTo&param=0&orderBy=%s&recTotal=0&recPerPage=%d&pageID=%d", objectType, url.QueryEscape(orderBy), recPerPage, pageID)
 }
 
 func assignedPagePath(objectType string, pageID, recPerPage int) string {
-	method := "task"
-	if objectType == "bug" {
-		method = "bug"
-	}
-	return fmt.Sprintf("index.php?m=my&f=%s&browseType=assignedTo&param=0&orderBy=id_desc&recTotal=0&recPerPage=%d&pageID=%d", method, recPerPage, pageID)
+	return fmt.Sprintf("index.php?m=my&f=%s&browseType=assignedTo&param=0&orderBy=id_desc&recTotal=0&recPerPage=%d&pageID=%d", objectType, recPerPage, pageID)
 }
 
 func (c *Client) fetchAssignedPage(ctx context.Context, path string) ([]byte, error) {

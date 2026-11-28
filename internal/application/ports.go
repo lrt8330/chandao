@@ -16,6 +16,10 @@ type ZentaoGateway interface {
 	// 事项（含已完成状态）。超出预算时返回 ErrIncrementalBudgetExceeded，
 	// 调用方应回退全量抓取。
 	FetchAssignedItemsUpdatedSince(ctx context.Context, since time.Time) ([]domain.Item, error)
+	// RunItemAction 对一条事项执行生命周期操作（task: start/finish/pause/
+	// cancel/close；bug: resolve/activate/close）。会话失效返回会话过期类
+	// 错误，调用方可重新登录后重试。
+	RunItemAction(ctx context.Context, itemType domain.ItemType, id, action string) error
 }
 
 // Notifier delivers changes detected by a successful refresh.

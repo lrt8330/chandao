@@ -73,6 +73,30 @@ func ParseAssignedBugsWithFinished(body []byte, pageURL string) ([]domain.Item, 
 	})
 }
 
+// ParseAssignedStories extracts assigned-to stories from a my-story page.
+// 需求列表没有项目列，项目名退回计划或产品名。
+func ParseAssignedStories(body []byte, pageURL string) ([]domain.Item, error) {
+	return parseAssigned(body, pageURL, assignedSpec{
+		tableID:      "storyList",
+		objectType:   "story",
+		itemType:     domain.ItemStory,
+		titleClasses: []string{"c-title", "c-name"},
+	})
+}
+
+// ParseAssignedStoriesWithFinished extracts stories of every status from a
+// my-story page. Incremental sync needs finished rows so the caller can
+// remove them from its local index.
+func ParseAssignedStoriesWithFinished(body []byte, pageURL string) ([]domain.Item, error) {
+	return parseAssigned(body, pageURL, assignedSpec{
+		tableID:         "storyList",
+		objectType:      "story",
+		itemType:        domain.ItemStory,
+		titleClasses:    []string{"c-title", "c-name"},
+		includeFinished: true,
+	})
+}
+
 type assignedSpec struct {
 	tableID         string
 	objectType      string
@@ -513,7 +537,7 @@ func parseModernItem(row *html.Node, pageURL string, spec assignedSpec) (domain.
 		ID:        id,
 		Type:      spec.itemType,
 		Title:     title,
-		Project:   normalizedCellText(row, "c-project"),
+		Project:   modernProject(row),
 		Status:    status,
 		UpdatedAt: normalizedCellText(row, "c-lastEditedDate"),
 		URL:       detailURL,
@@ -522,6 +546,18 @@ func parseModernItem(row *html.Node, pageURL string, spec assignedSpec) (domain.
 		return domain.Item{}, err
 	}
 	return item, nil
+}
+
+// modernProject 取行里的项目名：任务和 Bug 用 c-project，需求列表没有
+// 项目列，退回计划（c-plan）再退产品（c-product）。
+func modernProject(row *html.Node) string {
+	if project := normalizedCellText(row, "c-project"); project != "" {
+		return project
+	}
+	if plan := normalizedCellText(row, "c-plan"); plan != "" {
+		return plan
+	}
+	return normalizedCellText(row, "c-product")
 }
 
 func validateItem(item domain.Item) error {
@@ -546,7 +582,11 @@ func (spec assignedSpec) unfinished(status string) (bool, error) {
 	case "wait", "doing", "pause":
 		return spec.itemType == domain.ItemTask, nil
 	case "active":
-		return spec.itemType == domain.ItemBug, nil
+		// Bug 的活跃态；需求的激活态同为未完结。
+		return spec.itemType == domain.ItemBug || spec.itemType == domain.ItemStory, nil
+	case "changed", "draft":
+		// 需求的已变更/草稿态：指派给人时仍未完结。
+		return spec.itemType == domain.ItemStory, nil
 	case "done", "cancel", "canceled", "cancelled", "closed", "resolved":
 		return false, nil
 	default:

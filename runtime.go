@@ -80,6 +80,32 @@ func newWorkbenchRuntime(cx *core.Scope, data *core.Signal[ui.WorkbenchData], se
 // openReport 打开独立报表窗体；重复打开时只显示并聚焦已有窗体。
 func (r *workbenchRuntime) openReport() { r.report.Open() }
 
+// runItemAction 在后台对一条事项执行生命周期操作（开始/完成/解决/关闭
+// 等），成功后立即刷新；done 在 UI 线程收到人类可读的错误（成功为空串）。
+func (r *workbenchRuntime) runItemAction(item domain.Item, action string, done func(errorMessage string)) {
+	go func() {
+		r.opMu.Lock()
+		err := func() error {
+			controller, _, _, ok := r.currentController()
+			if !ok {
+				return errors.New("请先登录禅道账号。")
+			}
+			ctx, cancel := context.WithTimeout(r.ctx, 30*time.Second)
+			defer cancel()
+			return controller.RunItemAction(ctx, item, action)
+		}()
+		r.opMu.Unlock()
+		r.cx.Post(func() {
+			if err != nil {
+				done(userMessage(err))
+				return
+			}
+			r.refresh()
+			done("")
+		})
+	}()
+}
+
 func (r *workbenchRuntime) start() {
 	r.cx.OnQuit(func(context.Context) { r.stop() })
 	go r.loadSavedCredentials()

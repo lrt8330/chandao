@@ -126,8 +126,11 @@ func loadTestBuildItems(count int) []loadTestItem {
 // loadTestPage 渲染一页指派表格。
 func loadTestPage(kind string, items []loadTestItem, total int) string {
 	tableID := "tasktable"
-	if kind == "bug" {
+	switch kind {
+	case "bug":
 		tableID = "bugList"
+	case "story":
+		tableID = "storyList"
 	}
 	var body strings.Builder
 	for _, item := range items {
@@ -220,6 +223,10 @@ func TestThousandAssignedItemsConcurrentRefresh(t *testing.T) {
 			}
 			slice := append([]loadTestItem(nil), ordered[start:end]...)
 			fmt.Fprint(w, loadTestPage("bug", slice, len(ordered)))
+		case r.URL.Path == "/biz/index.php" && query.Get("m") == "my" && query.Get("f") == "story":
+			// 负载测试关注任务与 Bug 的翻页行为，需求页返回空表即可。
+			pageFetches.Add(1)
+			fmt.Fprint(w, loadTestPage("story", nil, 0))
 		default:
 			t.Errorf("unexpected request: %s", r.URL.String())
 			http.NotFound(w, r)

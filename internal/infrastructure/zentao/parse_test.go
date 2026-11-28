@@ -17,9 +17,44 @@ import (
 )
 
 const (
-	assignedTasksPageURL = "https://zentao.example.invalid/biz/my-task-type=assignedTo.html"
-	assignedBugsPageURL  = "https://zentao.example.invalid/biz/my-bug-type=assignedTo.html"
+	assignedTasksPageURL   = "https://zentao.example.invalid/biz/my-task-type=assignedTo.html"
+	assignedBugsPageURL    = "https://zentao.example.invalid/biz/my-bug-type=assignedTo.html"
+	assignedStoriesPageURL = "https://zentao.example.invalid/biz/my-story-type=assignedTo.html"
 )
+
+// TestParseAssignedStoriesModern 需求夹具：项目名退回计划列，含全状态
+// 解析与完结行过滤。
+func TestParseAssignedStoriesModern(t *testing.T) {
+	body := readAssignedFixture(t, "assigned_stories_modern.html")
+	all, err := ParseAssignedStoriesWithFinished(body, assignedStoriesPageURL)
+	if err != nil {
+		t.Fatalf("ParseAssignedStoriesWithFinished: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("items = %d rows, want 3", len(all))
+	}
+	if all[0].ID != "301" || all[0].Type != domain.ItemStory || all[0].Status != "active" {
+		t.Fatalf("first row = %#v", all[0])
+	}
+	if all[0].Project != "2026 年二季度" {
+		t.Fatalf("project fell back to plan = %q", all[0].Project)
+	}
+	if all[0].URL != "https://zentao.example.invalid/biz/story-view-301.html" {
+		t.Fatalf("url = %q", all[0].URL)
+	}
+	if all[1].Status != "changed" || all[2].Status != "closed" {
+		t.Fatalf("statuses = %q %q", all[1].Status, all[2].Status)
+	}
+
+	// 默认解析只保留未完结：closed 行被过滤。
+	unfinished, err := ParseAssignedStories(body, assignedStoriesPageURL)
+	if err != nil {
+		t.Fatalf("ParseAssignedStories: %v", err)
+	}
+	if len(unfinished) != 2 {
+		t.Fatalf("unfinished rows = %d, want 2", len(unfinished))
+	}
+}
 
 func TestParseAssignedTasksModern(t *testing.T) {
 	body := readAssignedFixture(t, "assigned_tasks_modern.html")

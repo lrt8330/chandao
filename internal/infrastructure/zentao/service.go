@@ -1,4 +1,5 @@
-// Package zentao implements the authenticated, read-only Zentao gateway.
+// Package zentao implements the authenticated Zentao gateway: assigned-item
+// sync (read) and item lifecycle actions (write).
 package zentao
 
 import (
@@ -39,6 +40,19 @@ func NewService(client *Client) *Service {
 	return &Service{client: client}
 }
 
+// RunItemAction 以当前会话执行一条事项操作（开始/完成/解决/关闭等）：
+// 抓取操作页表单、回填隐藏字段与预填值后原样提交。
+func (s *Service) RunItemAction(ctx context.Context, itemType domain.ItemType, id, action string) error {
+	form, err := s.client.FetchActionForm(ctx, string(itemType), action, id)
+	if err != nil {
+		return err
+	}
+	if _, err := s.client.SubmitAction(ctx, form, nil); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Login delegates session establishment to the HTTP client.
 func (s *Service) Login(ctx context.Context) error {
 	return s.client.Login(ctx)
@@ -47,7 +61,8 @@ func (s *Service) Login(ctx context.Context) error {
 // FetchAssignedItemsUpdatedSince 增量抓取 lastEditedDate 晚于 since 的指派
 // 事项（含已完成状态，调用方据此从本地索引移除终结事项）。按
 // lastEditedDate 倒序翻页，出现整页均不晚于 since、或不足一页、或超出
-// 页预算时停止；超预算返回 ErrIncrementalBudgetExceeded。
+// 页预算时停止；超预算返回 ErrIncrementalBudgetExceeded。需求抓取失败
+// 仅降级（返回任务和 Bug），不阻断整轮刷新。
 func (s *Service) FetchAssignedItemsUpdatedSince(ctx context.Context, since time.Time) ([]domain.Item, error) {
 	tasks, err := s.fetchPagesSince(ctx, "task", since)
 	if err != nil {
@@ -57,8 +72,13 @@ func (s *Service) FetchAssignedItemsUpdatedSince(ctx context.Context, since time
 	if err != nil {
 		return nil, err
 	}
-	itemsByKey := make(map[string]domain.Item, len(tasks)+len(bugs))
-	for _, items := range [][]domain.Item{tasks, bugs} {
+	// 需求页与任务/Bug 的列结构存在差异，解析失败时不阻断同步。
+	stories, storyErr := s.fetchPagesSince(ctx, "story", since)
+	if storyErr != nil {
+		stories = nil
+	}
+	itemsByKey := make(map[string]domain.Item, len(tasks)+len(bugs)+len(stories))
+	for _, items := range [][]domain.Item{tasks, bugs, stories} {
 		for _, item := range items {
 			itemsByKey[item.Key()] = item
 		}
@@ -96,8 +116,11 @@ func (s *Service) fetchPagesSince(ctx context.Context, objectType string, since 
 
 // parseUpdatedPage 解析一页含全部状态的事项行。
 func parseUpdatedPage(body []byte, pageURL string, objectType string) ([]domain.Item, error) {
-	if objectType == "bug" {
+	switch objectType {
+	case "bug":
 		return ParseAssignedBugsWithFinished(body, pageURL)
+	case "story":
+		return ParseAssignedStoriesWithFinished(body, pageURL)
 	}
 	return ParseAssignedTasksWithFinished(body, pageURL)
 }
@@ -131,7 +154,8 @@ func parseLastEdited(value string) (time.Time, bool) {
 }
 
 // FetchAssignedItems returns a complete, deduplicated snapshot sorted by item key.
-// Any failure discards all items accumulated during the refresh.
+// Any failure discards all items accumulated during the refresh. 需求抓取
+// 失败仅降级（快照缺需求），不阻断任务和 Bug 的刷新。
 func (s *Service) FetchAssignedItems(ctx context.Context) ([]domain.Item, error) {
 	tasks, err := s.fetchPages(ctx, "task", s.client.FetchAssignedTasksPage, ParseAssignedTasks)
 	if err != nil {
@@ -141,9 +165,14 @@ func (s *Service) FetchAssignedItems(ctx context.Context) ([]domain.Item, error)
 	if err != nil {
 		return nil, err
 	}
+	// 需求页与任务/Bug 的列结构存在差异，解析失败时不阻断全量刷新。
+	stories, storyErr := s.fetchPages(ctx, "story", s.client.FetchAssignedStoriesPage, ParseAssignedStories)
+	if storyErr != nil {
+		stories = nil
+	}
 
-	itemsByKey := make(map[string]domain.Item, len(tasks)+len(bugs))
-	for _, items := range [][]domain.Item{tasks, bugs} {
+	itemsByKey := make(map[string]domain.Item, len(tasks)+len(bugs)+len(stories))
+	for _, items := range [][]domain.Item{tasks, bugs, stories} {
 		for _, item := range items {
 			key := item.Key()
 			if previous, exists := itemsByKey[key]; exists && previous != item {

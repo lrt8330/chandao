@@ -5,8 +5,9 @@ import "strings"
 type ItemType string
 
 const (
-	ItemTask ItemType = "task"
-	ItemBug  ItemType = "bug"
+	ItemTask  ItemType = "task"
+	ItemBug   ItemType = "bug"
+	ItemStory ItemType = "story"
 )
 
 type Item struct {

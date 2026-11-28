@@ -20,6 +20,14 @@ func Workbench(cx *core.Scope, props WorkbenchProps) core.Node {
 	changesOnly := core.NewSignal(cx, false)
 	settingsOpen := core.NewSignal(cx, false)
 	notifyHistoryOpen := core.NewSignal(cx, false)
+	paletteOpen := core.NewSignal(cx, false)
+	// Ctrl+K 打开命令面板，Ctrl+R 立即刷新；绑定随工作台存活。
+	cx.OnKey("mod+k", func() { paletteOpen.Set(!paletteOpen.Get()) })
+	cx.OnKey("mod+r", func() {
+		if props.OnRefresh != nil && !props.data().Loading && !props.data().NeedsLogin {
+			props.OnRefresh()
+		}
+	})
 	selection := ui.NewSelection(cx, false)
 	selectedKey := props.SelectedKey
 	if selectedKey == nil {
@@ -68,6 +76,7 @@ func Workbench(cx *core.Scope, props WorkbenchProps) core.Node {
 			workbenchHeader(cx, props, settingsOpen, notifyHistoryOpen),
 			settingsDialog(cx, props, settingsOpen),
 			notificationHistoryDialog(cx, props.NotifyHistory, notifyHistoryOpen),
+			commandDialog(cx, props, settingsOpen, notifyHistoryOpen, changesOnly, paletteOpen),
 			core.Show{
 				When: func() bool { return strings.TrimSpace(props.data().ErrorMessage) != "" },
 				Then: func(cx *core.Scope) core.Node {
@@ -234,7 +243,7 @@ func workbenchList(cx *core.Scope, entries func() []listEntry, selection *ui.Sel
 							core.Text{ContentFunc: func() string { return item().Title }, MaxLines: 2, Style: ui.TypeLabel.Merge(core.Style{FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0)})},
 						}},
 						core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 12, Wrap: core.Wrap}, Children: []core.Node{
-							core.Text{ContentFunc: func() string { return item().Status }, Style: ui.TypeCaption, StyleFunc: ui.Colored(colors.Accent)},
+							statusBadge(func() string { return item().Status }),
 							core.Text{ContentFunc: func() string { return formatUpdatedAt(item().UpdatedAt) }, MaxLines: 1, Style: ui.TypeCaption.Merge(core.Style{FontFamily: Mono}), StyleFunc: ui.Colored(colors.Muted)},
 						}},
 					}}
@@ -300,6 +309,27 @@ func projectGroupHeader(cx *core.Scope, entry listEntry) core.Node {
 	}
 }
 
+// statusBadge 是行内状态胶囊：语义色由状态映射（进行中钴蓝、活跃 Bug
+// 红、待处理琥珀、完结绿），文本保持禅道原词。
+func statusBadge(status func() string) core.Node {
+	return ui.Badge{
+		TextFunc: status,
+		VariantFunc: func() ui.BadgeVariant {
+			switch strings.ToLower(strings.TrimSpace(status())) {
+			case "doing":
+				return ui.BadgeAccent
+			case "active":
+				return ui.BadgeDanger
+			case "wait":
+				return ui.BadgeWarn
+			case "closed", "done", "completed", "cancelled", "resolved", "fixed":
+				return ui.BadgeSuccess
+			}
+			return ui.BadgeNeutral
+		},
+	}
+}
+
 func errorBanner(cx *core.Scope, message func() string) core.Node {
 	colors := ui.ColorsOf(cx)
 	return core.View{
@@ -312,15 +342,27 @@ func errorBanner(cx *core.Scope, message func() string) core.Node {
 	}
 }
 
+// loadingState 是列表的加载骨架屏：几行脉冲占位块加一句说明，比单一
+// 文案更接近加载完成后的列表形态。
 func loadingState(cx *core.Scope) core.Node {
 	colors := ui.ColorsOf(cx)
+	rows := make([]core.Node, 0, 4)
+	for i := range 4 {
+		rows = append(rows, core.View{
+			Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 10},
+			Children: []core.Node{
+				ui.SkeletonBlock{Width: core.Pt(44), Height: core.Pt(16), Index: i},
+				ui.SkeletonBlock{Width: core.Pct(float32(78 - i*14)), Height: core.Pt(12), Index: i + 1},
+			},
+		})
+	}
 	return core.View{
 		TestID: "loading-state",
-		Style:  core.Style{Padding: core.Symmetric(8, 12), CornerRadius: ui.RadiusControl},
+		Style:  core.Style{Padding: core.Symmetric(10, 12), Gap: 10, CornerRadius: ui.RadiusControl},
 		StyleFunc: func() core.Style {
 			return core.Style{Background: colors.Inset(), BorderWidth: 1, BorderColor: colors.Border()}
 		},
-		Children: []core.Node{core.Text{Content: "正在加载禅道数据…", Style: ui.TypeBody, StyleFunc: ui.Colored(colors.Accent)}},
+		Children: append(rows, core.Text{Content: "正在加载禅道数据…", Style: ui.TypeBody, StyleFunc: ui.Colored(colors.Accent)}),
 	}
 }
 
@@ -507,7 +549,14 @@ func todoAnchorCard(cx *core.Scope, kpis func() kpiCounts) core.Node {
 	colors := ui.ColorsOf(cx)
 	open := func() int { return kpis().tasks + kpis().bugs }
 	return core.View{Style: core.Style{Gap: 8}, Children: []core.Node{
-		monoCap(cx, "我的待办", colors.Muted),
+		core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 6}, Children: []core.Node{
+			monoCap(cx, "我的待办", colors.Muted),
+			ui.Tooltip{
+				Text: "当前指派给我、尚未关闭的任务与 Bug 总数",
+				Trigger: core.Icon{SVG: lucide.Info(), Label: "说明",
+					Style: core.Style{FontSize: 13}, StyleFunc: ui.Colored(colors.Faint)},
+			},
+		}},
 		core.Text{
 			ContentFunc: func() string { return strconv.Itoa(open()) }, TestID: "kpi-open-value",
 			Style:     core.Style{FontSize: 42, LineHeight: 44, FontWeight: ui.Regular, FontFamily: Serif, LetterSpacingEm: -0.045},
@@ -535,6 +584,11 @@ func changeAnchorCard(cx *core.Scope, kpis func() kpiCounts, changes func() []do
 			core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignBaseline, Gap: 8}, Children: []core.Node{
 				monoCap(cx, "ACTIVITY", colors.Muted),
 				core.Text{Content: "本轮动态", Style: ui.TypeTitle},
+				ui.Tooltip{
+					Text: "本次刷新相对上次的差异预览，完整记录见通知历史",
+					Trigger: core.Icon{SVG: lucide.Info(), Label: "说明",
+						Style: core.Style{FontSize: 13}, StyleFunc: ui.Colored(colors.Faint)},
+				},
 				core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignBaseline, Gap: 5, FlexGrow: 1, JustifyContent: core.JustifyEnd}, Children: []core.Node{
 					core.Text{ContentFunc: func() string { return strconv.Itoa(kpis().added) }, TestID: "kpi-new-value", Style: ui.TypeTitle},
 					core.Text{Content: "新增", Style: ui.TypeCaption, StyleFunc: ui.Colored(colors.Muted)},

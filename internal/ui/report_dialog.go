@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -183,6 +184,9 @@ func reportWindowBody(cx *core.Scope, store *notifyhistory.Store, onClose func()
 						core.Dynamic(func(cx *core.Scope) core.Node {
 							return trendChart(cx, points.Get())
 						}),
+						core.Dynamic(func(cx *core.Scope) core.Node {
+							return compositionMeters(cx, points.Get())
+						}),
 					}),
 					reportCard(cx, "变化统计 · 按天", lucide.Activity, []core.Node{
 						core.Dynamic(func(cx *core.Scope) core.Node {
@@ -207,6 +211,43 @@ func reportWindowBody(cx *core.Scope, store *notifyhistory.Store, onClose func()
 			},
 		},
 	}
+}
+
+// compositionMeters 用原生 Meter 展示最新快照的任务/Bug 构成占比。
+func compositionMeters(cx *core.Scope, points []notifyhistory.SnapshotPoint) core.Node {
+	if len(points) == 0 {
+		return core.View{}
+	}
+	latest := points[len(points)-1]
+	total := latest.TasksTotal + latest.BugsActive
+	if total <= 0 {
+		return core.View{}
+	}
+	colors := ui.ColorsOf(cx)
+	row := func(label string, count int, variant ui.MeterVariant) core.Node {
+		share := float64(count) / float64(total)
+		return core.View{
+			TestID: "report-composition",
+			Style:  core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 10, MinWidth: core.Pt(0)},
+			Children: []core.Node{
+				core.Text{Content: label, Style: ui.TypeCaption.Merge(core.Style{Width: core.Pt(32), FlexShrink: 0}), StyleFunc: ui.Colored(colors.Muted)},
+				ui.Meter{Value: func() float64 { return share }, Variant: variant},
+				core.Text{
+					Content: fmt.Sprintf("%d · %.0f%%", count, share*100),
+					Style:   ui.TypeCaption.Merge(core.Style{FontFamily: Mono, Width: core.Pt(72), FlexShrink: 0}),
+					StyleFunc: func() core.Style {
+						style := ui.Colored(colors.Muted)()
+						style.TextAlign = core.TextAlignEnd
+						return style
+					},
+				},
+			},
+		}
+	}
+	return core.View{Style: core.Style{Gap: 8}, Children: []core.Node{
+		row("任务", latest.TasksTotal, ui.MeterAccent),
+		row("Bug", latest.BugsActive, ui.MeterDanger),
+	}}
 }
 
 // rangeTabs 用原生 Tabs 组件承载时间范围切换（按压处理可靠）。Value 用

@@ -2,7 +2,9 @@
 package main
 
 import (
+	"context"
 	"path/filepath"
+	"time"
 
 	"github.com/nsgo-dev/nsgo"
 	"github.com/nsgo-dev/nsgo/core"
@@ -46,6 +48,13 @@ func mountWorkbench(cx *core.Scope) *workbenchRuntime {
 		history = nil
 	} else {
 		cx.Cleanup(func() { history.Close() })
+		// 启动时把历史裁剪到最近 1 万条：通知历史同时是报表数据源，
+		// 裁剪防止长期积累无限增长，同时保留足够的回看窗口。
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_ = history.Trim(ctx, 10000)
+		}()
 	}
 	runtime := newWorkbenchRuntime(cx, data, selectedKey, showWindow, history)
 	workbench := func(windowCx *core.Scope) core.Node {

@@ -38,3 +38,6 @@ Desktop.ini
 .DS_Store
 .idea/
 .vscode/
+
+# zentaoctl 实机抓取的页面（含真实数据，不入库）
+/testdata/live/

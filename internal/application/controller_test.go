@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -788,5 +789,59 @@ func TestRefreshFirstBaselineSavesWithoutNotification(t *testing.T) {
 	loginCalls, fetchCalls := gateway.counts()
 	if loginCalls != 1 || fetchCalls != 1 {
 		t.Errorf("gateway calls = (%d logins, %d fetches), want (1, 1)", loginCalls, fetchCalls)
+	}
+}
+
+// TestLargeAccountReconcileThrottledByTime 验证大账号（超过 5 万条）的
+// 全量对账按时间节流：1 小时窗口内持续增量、不触发全量爬取；窗口过后
+// 回退一次全量对账。
+func TestLargeAccountReconcileThrottledByTime(t *testing.T) {
+	largeItems := make([]domain.Item, 0, 50001)
+	for index := 1; index <= 50001; index++ {
+		largeItems = append(largeItems, domain.Item{
+			ID: strconv.Itoa(index), Type: domain.ItemBug, Title: "大批量", Status: "active",
+		})
+	}
+
+	// 阶段一：对账时间在节流窗口内 → 连续 21 轮全部走增量。
+	throttledSnapshot := application.DefaultSnapshot()
+	throttledSnapshot.Initialized = true
+	throttledSnapshot.LastSuccess = time.Now().Add(-2 * time.Minute)
+	throttledSnapshot.LastReconcile = time.Now()
+	throttledSnapshot.Items = itemMap(largeItems...)
+	gatewayA := &fakeGateway{items: largeItems, updatedItems: largeItems}
+	storeA := &fakeStore{snapshot: cloneSnapshot(throttledSnapshot)}
+	controllerA := newTestController(t, gatewayA, storeA, &fakeNotifier{})
+	for round := 0; round < 21; round++ {
+		if _, err := controllerA.Refresh(context.Background()); err != nil {
+			t.Fatalf("throttled refresh %d: %v", round, err)
+		}
+	}
+	if gatewayA.fetchCalls != 0 {
+		t.Fatalf("full crawls during throttle window = %d, want 0", gatewayA.fetchCalls)
+	}
+	if gatewayA.updatedCalls != 21 {
+		t.Fatalf("incremental fetches = %d, want 21", gatewayA.updatedCalls)
+	}
+
+	// 阶段二：对账时间拨回 2 小时前 → 下一次刷新回退全量对账。
+	staleSnapshot := throttledSnapshot
+	staleSnapshot.LastReconcile = time.Now().Add(-2 * time.Hour)
+	gatewayB := &fakeGateway{items: largeItems, updatedItems: largeItems}
+	storeB := &fakeStore{snapshot: cloneSnapshot(staleSnapshot)}
+	controllerB := newTestController(t, gatewayB, storeB, &fakeNotifier{})
+
+	result, err := controllerB.Refresh(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile refresh: %v", err)
+	}
+	if gatewayB.fetchCalls == 0 {
+		t.Fatal("reconcile refresh did not run the full crawl")
+	}
+	if len(result.Snapshot.Items) != len(largeItems) {
+		t.Fatalf("reconcile items = %d, want %d", len(result.Snapshot.Items), len(largeItems))
+	}
+	if saved, _ := storeB.state(); saved.LastReconcile.IsZero() {
+		t.Fatal("lastReconcile not persisted after reconciliation")
 	}
 }

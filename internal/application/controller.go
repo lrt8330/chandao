@@ -25,7 +25,15 @@ type RefreshResult struct {
 
 // reconcileEvery 每隔多少次成功刷新做一次全量对账，纠正增量可能错过
 // 的删除与漂移。
-const reconcileEvery = 20
+const (
+	// reconcileEvery 每隔多少次成功刷新做一次全量对账，纠正增量可能错
+	// 过的删除与漂移。
+	reconcileEvery = 20
+	// largeAccountItems / largeAccountReconcileInterval 大账号（指派列表
+	// 巨大，全量爬取对服务端压力显著）按时间节流对账频率。
+	largeAccountItems             = 50000
+	largeAccountReconcileInterval = time.Hour
+)
 
 // syncSafetyMargin 覆盖禅道时间戳精度与时钟偏差。
 const syncSafetyMargin = 2 * time.Minute
@@ -40,6 +48,7 @@ type Controller struct {
 	snapshot        Snapshot
 	loggedIn        bool
 	reconciles      int
+	onSnapshot      func(Snapshot)
 	cancel          context.CancelFunc
 	done            chan struct{}
 	settingsChanged chan struct{}
@@ -168,6 +177,25 @@ func (c *Controller) pollInterval() time.Duration {
 	return time.Duration(c.snapshot.PollSeconds) * time.Second
 }
 
+// shouldReconcileNow 判断本次刷新是否回退全量对账：小账号按刷新次数
+// 周期对账；大账号只按时间节流（每小时至多一次全量，避免频繁爬取压
+// 垮服务端）。节流窗口随快照持久化，重启后依然有效。
+func (c *Controller) shouldReconcileNow() bool {
+	if len(c.snapshot.Items) > largeAccountItems {
+		return c.snapshot.LastReconcile.IsZero() ||
+			time.Since(c.snapshot.LastReconcile) >= largeAccountReconcileInterval
+	}
+	return c.reconciles >= reconcileEvery
+}
+
+// SetOnSnapshot 注册每次成功刷新后的快照回调（用于本地报表采集）。
+// 回调在刷新锁之外执行，不得再调用会触发刷新的方法。
+func (c *Controller) SetOnSnapshot(fn func(Snapshot)) {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	c.onSnapshot = fn
+}
+
 // CurrentSnapshot returns a copy of the current snapshot so the interface
 // can render persisted items before the first refresh completes.
 func (c *Controller) CurrentSnapshot() Snapshot {
@@ -199,7 +227,7 @@ func (c *Controller) Refresh(ctx context.Context) (RefreshResult, error) {
 		c.loggedIn = true
 	}
 
-	useIncremental := c.snapshot.Initialized && c.reconciles < reconcileEvery
+	useIncremental := c.snapshot.Initialized && !c.shouldReconcileNow()
 	var items []domain.Item
 	if useIncremental {
 		fetched, err := c.gateway.FetchAssignedItemsUpdatedSince(ctx, c.snapshot.LastSuccess.Add(-syncSafetyMargin))
@@ -273,6 +301,7 @@ func (c *Controller) Refresh(ctx context.Context) (RefreshResult, error) {
 	} else {
 		changes = domain.DetectChanges(snapshot.Items, current, !snapshot.Initialized)
 		snapshot.Items = current
+		snapshot.LastReconcile = time.Now()
 		c.reconciles = 0
 	}
 	snapshot.LastSuccess = time.Now()
@@ -287,6 +316,9 @@ func (c *Controller) Refresh(ctx context.Context) (RefreshResult, error) {
 	}
 	c.snapshot = snapshot
 	c.refreshMu.Unlock()
+	if c.onSnapshot != nil {
+		c.onSnapshot(snapshot)
+	}
 	if snapshot.NotificationsEnabled && len(changes) > 0 {
 		c.notifier.Notify(ctx, changes)
 	}

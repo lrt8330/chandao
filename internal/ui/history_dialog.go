@@ -52,8 +52,8 @@ func notificationHistoryDialog(cx *core.Scope, store *notifyhistory.Store, open 
 	}
 	close := func() { open.Set(false) }
 
-	// 组件随 Workbench 每次渲染重建，这里直接加载最近记录：
-	// Recent 走索引查询（毫秒级），保证打开对话框时数据是最新的。
+	// 组件随 Workbench 每次渲染重建：无条件加载一次，保证打开对话框时
+	// 记录与未读计数是最新的。
 	load()
 	description := "最近已通知的变化记录（本地保留，最多 100 条）。"
 	return ui.Dialog{

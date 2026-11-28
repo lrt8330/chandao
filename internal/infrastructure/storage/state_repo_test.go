@@ -87,6 +87,7 @@ func TestStateJSONContainsOnlySnapshotFields(t *testing.T) {
 		"popupSeconds":         true,
 		"pollSeconds":          true,
 		"initialized":          true,
+		"lastReconcile":        true,
 	}
 	if len(fields) != len(want) {
 		t.Fatalf("state JSON has %d fields, want %d: %s", len(fields), len(want), data)

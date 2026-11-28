@@ -39,7 +39,7 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open notify history: %w", err)
 	}
-	schema := `
+	schema := snapshotsSchema + `
 CREATE TABLE IF NOT EXISTS notifications (
 	id         INTEGER PRIMARY KEY AUTOINCREMENT,
 	ts         TEXT NOT NULL,

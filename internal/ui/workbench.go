@@ -413,10 +413,19 @@ func workbenchHeader(cx *core.Scope, props WorkbenchProps, settingsOpen, notifyH
 
 	headerActions := []core.Node{}
 	if props.NotifyHistory != nil {
-		headerActions = append(headerActions, ui.Button{
-			Text: "通知", TestID: "open-notify-history", Variant: ui.ButtonOutline,
-			Icon: lucide.Bell, OnPress: func() { notifyHistoryOpen.Set(true) },
-		})
+		headerActions = append(headerActions,
+			ui.Button{
+				Text: "报表", TestID: "open-report", Variant: ui.ButtonOutline,
+				Icon: lucide.ChartLine, OnPress: func() {
+					if props.OnOpenReport != nil {
+						props.OnOpenReport()
+					}
+				},
+			},
+			ui.Button{
+				Text: "通知", TestID: "open-notify-history", Variant: ui.ButtonOutline,
+				Icon: lucide.Bell, OnPress: func() { notifyHistoryOpen.Set(true) },
+			})
 	}
 	settings := ui.Button{
 		Text: "设置", TestID: "open-settings", Variant: ui.ButtonOutline,

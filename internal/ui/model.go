@@ -33,6 +33,7 @@ type WorkbenchProps struct {
 	OnOpenURL     func(string)
 	OnLogin       func(account, password string)
 	OnSettings    func(pollSeconds int, notificationsEnabled bool, popupSeconds int)
+	OnOpenReport  func()
 	NotifyHistory *notifyhistory.Store
 }
 

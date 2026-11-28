@@ -22,6 +22,7 @@ type Snapshot struct {
 	PopupSeconds         int                    `json:"popupSeconds"`
 	PollSeconds          int                    `json:"pollSeconds"`
 	Initialized          bool                   `json:"initialized"`
+	LastReconcile        time.Time              `json:"lastReconcile"`
 }
 
 // Validate rejects settings that cannot be used safely.

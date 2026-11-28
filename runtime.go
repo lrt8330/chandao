@@ -8,9 +8,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"chandao/zentaotray/internal/application"
 	"chandao/zentaotray/internal/domain"
+	"chandao/zentaotray/internal/infrastructure/notifyhistory"
 	"chandao/zentaotray/internal/infrastructure/security"
 	"chandao/zentaotray/internal/infrastructure/storage"
 	"chandao/zentaotray/internal/infrastructure/zentao"
@@ -36,13 +38,15 @@ func configuredZentaoBaseURL() string {
 // workbenchRuntime coordinates blocking session work with the UI goroutine.
 // Controller callbacks and all signal writes are marshaled through cx.Post.
 type workbenchRuntime struct {
-	cx          *core.Scope
-	data        *core.Signal[ui.WorkbenchData]
-	selectedKey *core.Signal[string]
-	showWindow  func()
-	popups      *ui.MessagePopupManager
-	credentials security.SecretsCredentialStore
-	statePath   string
+	cx            *core.Scope
+	data          *core.Signal[ui.WorkbenchData]
+	selectedKey   *core.Signal[string]
+	showWindow    func()
+	popups        *ui.MessagePopupManager
+	report        *ui.ReportWindow
+	credentials   security.SecretsCredentialStore
+	statePath     string
+	notifyHistory *notifyhistory.Store
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -56,20 +60,25 @@ type workbenchRuntime struct {
 	generation   uint64
 }
 
-func newWorkbenchRuntime(cx *core.Scope, data *core.Signal[ui.WorkbenchData], selectedKey *core.Signal[string], showWindow func()) *workbenchRuntime {
+func newWorkbenchRuntime(cx *core.Scope, data *core.Signal[ui.WorkbenchData], selectedKey *core.Signal[string], showWindow func(), history *notifyhistory.Store) *workbenchRuntime {
 	ctx, cancel := context.WithCancel(cx.Context())
 	return &workbenchRuntime{
-		cx:          cx,
-		data:        data,
-		selectedKey: selectedKey,
-		showWindow:  showWindow,
-		popups:      ui.NewMessagePopupManager(cx, func(key string) { selectedKey.Set(key); showWindow() }, showWindow),
-		credentials: security.SecretsCredentialStore{Secrets: cx.Secrets()},
-		statePath:   filepath.Join(cx.DataDir(), "state.json"),
-		ctx:         ctx,
-		cancel:      cancel,
+		cx:            cx,
+		data:          data,
+		selectedKey:   selectedKey,
+		showWindow:    showWindow,
+		popups:        ui.NewMessagePopupManager(cx, func(key string) { selectedKey.Set(key); showWindow() }, showWindow),
+		report:        ui.NewReportWindow(cx, history),
+		credentials:   security.SecretsCredentialStore{Secrets: cx.Secrets()},
+		statePath:     filepath.Join(cx.DataDir(), "state.json"),
+		notifyHistory: history,
+		ctx:           ctx,
+		cancel:        cancel,
 	}
 }
+
+// openReport 打开独立报表窗体；重复打开时只显示并聚焦已有窗体。
+func (r *workbenchRuntime) openReport() { r.report.Open() }
 
 func (r *workbenchRuntime) start() {
 	r.cx.OnQuit(func(context.Context) { r.stop() })
@@ -206,8 +215,38 @@ func (r *workbenchRuntime) newController(account, password string) (*application
 		r.ctx,
 		zentao.NewService(client),
 		storage.FileSnapshotStore{Path: r.statePath},
-		messagePopupNotifier{manager: r.popups, duration: func() int { return r.data.Get().PopupSeconds }},
+		messagePopupNotifier{manager: r.popups, history: r.notifyHistory, duration: func() int { return r.data.Get().PopupSeconds }},
 	)
+}
+
+// recordSnapshot 把一次成功刷新的总量快照写入本地报表库。
+func (r *workbenchRuntime) recordSnapshot(snapshot application.Snapshot) {
+	if r.notifyHistory == nil {
+		return
+	}
+	point := notifyhistory.SnapshotPoint{}
+	for _, item := range snapshot.Items {
+		switch {
+		case item.Type == domain.ItemTask:
+			point.TasksTotal++
+			switch strings.ToLower(item.Status) {
+			case "doing":
+				point.TasksDoing++
+			case "wait":
+				point.TasksWait++
+			case "pause":
+				point.TasksPause++
+			}
+		case item.Type == domain.ItemBug && strings.EqualFold(item.Status, "active"):
+			point.BugsActive++
+		}
+	}
+	point.Total = len(snapshot.Items)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := r.notifyHistory.AppendSnapshot(ctx, snapshot.LastSuccess, point); err != nil {
+		_ = err
+	}
 }
 
 func (r *workbenchRuntime) refresh() {
@@ -382,10 +421,32 @@ func (r *workbenchRuntime) startControllerWithMode(controller *application.Contr
 
 type messagePopupNotifier struct {
 	manager  *ui.MessagePopupManager
+	history  *notifyhistory.Store
 	duration func() int
 }
 
-func (n messagePopupNotifier) Notify(_ context.Context, changes []domain.Change) {
+// Notify 先把变化写入本地 SQLite 历史（失败仅降级，不影响通知），再交给
+// 弹窗管理器分流：小批次逐条弹、大批次只弹一张摘要卡。
+func (n messagePopupNotifier) Notify(ctx context.Context, changes []domain.Change) {
+	if n.history != nil {
+		at := time.Now()
+		entries := make([]notifyhistory.Entry, 0, len(changes))
+		for _, change := range changes {
+			entries = append(entries, notifyhistory.Entry{
+				Time:      at,
+				Kind:      string(change.Kind),
+				ItemType:  string(change.Item.Type),
+				ItemID:    change.Item.ID,
+				Title:     change.Item.Title,
+				Project:   change.Item.Project,
+				OldStatus: change.Old,
+				NewStatus: change.New,
+			})
+		}
+		if err := n.history.Append(ctx, at, entries); err != nil {
+			_ = err
+		}
+	}
 	n.manager.Show(changes, n.duration())
 }
 

@@ -2,10 +2,13 @@
 package main
 
 import (
+	"path/filepath"
+
 	"github.com/nsgo-dev/nsgo"
 	"github.com/nsgo-dev/nsgo/core"
 	"github.com/nsgo-dev/nsgo/desktop"
 
+	"chandao/zentaotray/internal/infrastructure/notifyhistory"
 	"chandao/zentaotray/internal/ui"
 )
 
@@ -37,15 +40,24 @@ func mountWorkbench(cx *core.Scope) *workbenchRuntime {
 			window.Focus()
 		}
 	}
-	runtime := newWorkbenchRuntime(cx, data, selectedKey, showWindow)
+	// 通知历史（SQLite）：打开失败仅降级为无历史，弹窗通知不受影响。
+	history, historyErr := notifyhistory.Open(filepath.Join(cx.DataDir(), "notify.db"))
+	if historyErr != nil {
+		history = nil
+	} else {
+		cx.Cleanup(func() { history.Close() })
+	}
+	runtime := newWorkbenchRuntime(cx, data, selectedKey, showWindow, history)
 	workbench := func(windowCx *core.Scope) core.Node {
 		return ui.Workbench(windowCx, ui.WorkbenchProps{
-			DataFunc:    data.Get,
-			SelectedKey: selectedKey,
-			OnLogin:     runtime.login,
-			OnRefresh:   runtime.refresh,
-			OnSettings:  runtime.updateSettings,
-			OnOpenURL:   runtime.openURL,
+			DataFunc:      data.Get,
+			SelectedKey:   selectedKey,
+			OnLogin:       runtime.login,
+			OnRefresh:     runtime.refresh,
+			OnSettings:    runtime.updateSettings,
+			OnOpenURL:     runtime.openURL,
+			OnOpenReport:  runtime.openReport,
+			NotifyHistory: history,
 		})
 	}
 

@@ -3,6 +3,8 @@ package ui
 import (
 	"time"
 
+	"chandao/zentaotray/internal/infrastructure/notifyhistory"
+
 	"chandao/zentaotray/internal/domain"
 	"github.com/nsgo-dev/nsgo/core"
 )
@@ -24,13 +26,14 @@ type WorkbenchData struct {
 
 // WorkbenchProps connects the workbench to application and platform actions.
 type WorkbenchProps struct {
-	Data        WorkbenchData
-	DataFunc    func() WorkbenchData
-	SelectedKey *core.Signal[string]
-	OnRefresh   func()
-	OnOpenURL   func(string)
-	OnLogin     func(account, password string)
-	OnSettings  func(pollSeconds int, notificationsEnabled bool, popupSeconds int)
+	Data          WorkbenchData
+	DataFunc      func() WorkbenchData
+	SelectedKey   *core.Signal[string]
+	OnRefresh     func()
+	OnOpenURL     func(string)
+	OnLogin       func(account, password string)
+	OnSettings    func(pollSeconds int, notificationsEnabled bool, popupSeconds int)
+	NotifyHistory *notifyhistory.Store
 }
 
 func (props WorkbenchProps) data() WorkbenchData {

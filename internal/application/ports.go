@@ -3,6 +3,7 @@ package application
 
 import (
 	"context"
+	"time"
 
 	"chandao/zentaotray/internal/domain"
 )
@@ -11,6 +12,10 @@ import (
 type ZentaoGateway interface {
 	Login(ctx context.Context) error
 	FetchAssignedItems(ctx context.Context) ([]domain.Item, error)
+	// FetchAssignedItemsUpdatedSince 增量抓取 lastEditedDate 晚于 since 的
+	// 事项（含已完成状态）。超出预算时返回 ErrIncrementalBudgetExceeded，
+	// 调用方应回退全量抓取。
+	FetchAssignedItemsUpdatedSince(ctx context.Context, since time.Time) ([]domain.Item, error)
 }
 
 // Notifier delivers changes detected by a successful refresh.

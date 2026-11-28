@@ -19,6 +19,7 @@ func Workbench(cx *core.Scope, props WorkbenchProps) core.Node {
 	filter := core.NewSignal(cx, itemFilterAll)
 	changesOnly := core.NewSignal(cx, false)
 	settingsOpen := core.NewSignal(cx, false)
+	notifyHistoryOpen := core.NewSignal(cx, false)
 	selection := ui.NewSelection(cx, false)
 	selectedKey := props.SelectedKey
 	if selectedKey == nil {
@@ -64,8 +65,9 @@ func Workbench(cx *core.Scope, props WorkbenchProps) core.Node {
 		},
 		StyleFunc: workbenchCanvas(cx),
 		Children: []core.Node{
-			workbenchHeader(cx, props, settingsOpen),
+			workbenchHeader(cx, props, settingsOpen, notifyHistoryOpen),
 			settingsDialog(cx, props, settingsOpen),
+			notificationHistoryDialog(cx, props.NotifyHistory, notifyHistoryOpen),
 			core.Show{
 				When: func() bool { return strings.TrimSpace(props.data().ErrorMessage) != "" },
 				Then: func(cx *core.Scope) core.Node {
@@ -289,7 +291,8 @@ func countItems(entries []listEntry) int {
 func projectGroupHeader(cx *core.Scope, entry listEntry) core.Node {
 	colors := ui.ColorsOf(cx)
 	return core.View{
-		Style: core.Style{Direction: core.Row, AlignItems: core.AlignBaseline, Gap: 8, Padding: core.Edges{Top: core.Points(4), Bottom: core.Points(2)}, MinWidth: core.Pt(0)},
+		TestID: "project-group-" + entry.name,
+		Style:  core.Style{Direction: core.Row, AlignItems: core.AlignBaseline, Gap: 8, Padding: core.Edges{Top: core.Points(4), Bottom: core.Points(2)}, MinWidth: core.Pt(0)},
 		Children: []core.Node{
 			monoCap(cx, entry.name, colors.Muted),
 			core.Text{ContentFunc: func() string { return fmt.Sprintf("%d 项", entry.count) }, Style: ui.TypeCaption, StyleFunc: ui.Colored(colors.Faint)},
@@ -379,7 +382,7 @@ func finishedStatus(status string) bool {
 
 // workbenchHeader 是账户型头部：kicker、账号名主标题、连接与刷新元信息，
 // 右侧保留设置和唯一主操作「立即刷新」。
-func workbenchHeader(cx *core.Scope, props WorkbenchProps, settingsOpen *core.Signal[bool]) core.Node {
+func workbenchHeader(cx *core.Scope, props WorkbenchProps, settingsOpen, notifyHistoryOpen *core.Signal[bool]) core.Node {
 	colors := ui.ColorsOf(cx)
 	account := func() string {
 		value := strings.TrimSpace(props.data().Account)
@@ -408,6 +411,13 @@ func workbenchHeader(cx *core.Scope, props WorkbenchProps, settingsOpen *core.Si
 		return "上次刷新 " + value.Local().Format("2006-01-02 15:04")
 	}
 
+	headerActions := []core.Node{}
+	if props.NotifyHistory != nil {
+		headerActions = append(headerActions, ui.Button{
+			Text: "通知", TestID: "open-notify-history", Variant: ui.ButtonOutline,
+			Icon: lucide.Bell, OnPress: func() { notifyHistoryOpen.Set(true) },
+		})
+	}
 	settings := ui.Button{
 		Text: "设置", TestID: "open-settings", Variant: ui.ButtonOutline,
 		Icon: lucide.Settings, OnPress: func() { settingsOpen.Set(true) },
@@ -443,10 +453,10 @@ func workbenchHeader(cx *core.Scope, props WorkbenchProps, settingsOpen *core.Si
 					core.Text{ContentFunc: lastSuccess, Style: ui.TypeCaption, StyleFunc: ui.Colored(colors.Muted)},
 				}},
 			}},
-			core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 8, Wrap: core.Wrap}, Children: []core.Node{
+			core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 8, Wrap: core.Wrap}, Children: append([]core.Node{
 				settings,
 				refresh,
-			}},
+			}, headerActions...)},
 		},
 	}
 }

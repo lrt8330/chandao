@@ -187,11 +187,11 @@ func TestServiceStopsAfterMaximumPageCount(t *testing.T) {
 	if items != nil {
 		t.Fatalf("items = %#v, want nil when the page guard is reached", items)
 	}
-	if !errors.Is(err, ErrPageLimitExceeded) || !strings.Contains(err.Error(), "100") {
-		t.Fatalf("error = %v, want an explicit 100-page limit error", err)
+	if !errors.Is(err, ErrPageLimitExceeded) {
+		t.Fatalf("error = %v, want an explicit page-budget limit error", err)
 	}
-	if got := taskRequests.Load(); got != 100 {
-		t.Errorf("task requests = %d, want 100", got)
+	if got := taskRequests.Load(); got != 2000 {
+		t.Errorf("task requests = %d, want 2000", got)
 	}
 	if got := bugRequests.Load(); got != 0 {
 		t.Errorf("bug requests = %d, want 0", got)

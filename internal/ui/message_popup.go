@@ -17,6 +17,10 @@ const (
 	messagePopupGap    = 8
 	messagePopupMargin = 16
 	maxMessagePopups   = 4
+	// summaryPopupThreshold 单批变化超过该数量时只弹一个摘要卡，
+	// 避免大批次连续开合上千个面板。
+	summaryPopupThreshold = 20
+	summaryPopupHeight    = 128
 )
 
 type messagePopup struct {
@@ -30,17 +34,22 @@ type messagePopup struct {
 }
 
 type MessagePopupManager struct {
-	cx      *core.Scope
-	onPress func(string)
-	active  []*messagePopup
+	cx              *core.Scope
+	onPress         func(string)
+	onOpenWorkbench func()
+	active          []*messagePopup
 }
 
-func NewMessagePopupManager(cx *core.Scope, onPress func(string)) *MessagePopupManager {
-	return &MessagePopupManager{cx: cx, onPress: onPress}
+func NewMessagePopupManager(cx *core.Scope, onPress func(string), onOpenWorkbench func()) *MessagePopupManager {
+	return &MessagePopupManager{cx: cx, onPress: onPress, onOpenWorkbench: onOpenWorkbench}
 }
 
 func (m *MessagePopupManager) Show(changes []domain.Change, seconds int) {
 	if m == nil || m.cx == nil || len(changes) == 0 {
+		return
+	}
+	if len(changes) > summaryPopupThreshold {
+		m.cx.Post(func() { m.showSummary(changes, seconds) })
 		return
 	}
 	m.cx.Post(func() {
@@ -49,6 +58,78 @@ func (m *MessagePopupManager) Show(changes []domain.Change, seconds int) {
 			m.show(change, duration)
 		}
 	})
+}
+
+// summarizeCounts 统计一批变化的新增与状态变化数量。
+func summarizeCounts(changes []domain.Change) (newCount, statusCount int) {
+	for _, change := range changes {
+		switch change.Kind {
+		case domain.ChangeNew:
+			newCount++
+		case domain.ChangeStatus:
+			statusCount++
+		}
+	}
+	return newCount, statusCount
+}
+
+// showSummary 为大批次弹一张汇总卡：计数 + 打开工作台的入口，
+// 点击卡片即打开工作台（工作台的「仅看本轮变化」可查看全部明细）。
+func (m *MessagePopupManager) showSummary(changes []domain.Change, seconds int) {
+	if len(m.active) >= maxMessagePopups {
+		m.close(m.active[0])
+	}
+	newCount, statusCount := summarizeCounts(changes)
+	title := fmt.Sprintf("新增 %d · 状态变化 %d", newCount, statusCount)
+	description := fmt.Sprintf("共 %d 条变化，点击打开工作台查看全部明细。", len(changes))
+
+	duration := time.Duration(seconds) * time.Second
+	panel := &messagePopup{id: "summary", remaining: duration}
+	panel.window = desktop.OpenPanel(m.cx, desktop.PanelOptions{
+		Width: core.Points(messagePopupWidth), Height: core.Points(summaryPopupHeight),
+		Transparent: true, NoActivate: true,
+	}, func(panelCx *core.Scope) core.Node {
+		if duration > 0 {
+			panel.started = time.Now()
+			panel.timer = time.AfterFunc(duration, func() {
+				m.cx.Post(func() { m.close(panel) })
+			})
+			panelCx.Cleanup(func() { panel.stopTimer() })
+		}
+		colors := ui.ColorsOf(panelCx)
+		glass := ui.FinOf(panelCx).Glass()
+		return core.View{
+			TestID: "popup-summary", Role: core.RoleButton,
+			Label: title + ". " + description,
+			Style: core.Style{
+				FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0), MinHeight: core.Pt(0),
+				Direction: core.Column, AlignItems: core.AlignStart, Gap: 8, Padding: core.All(14),
+				Background: colors.Surface(), BorderWidth: 1, BorderColor: colors.Border(),
+				CornerRadius: ui.RadiusCard, BorderCurve: core.BorderCurveContinuous,
+				Shadows: glass.Shadows,
+			},
+			OnPress: func(core.PressEvent) {
+				m.close(panel)
+				if m.onOpenWorkbench != nil {
+					m.onOpenWorkbench()
+				}
+			},
+			OnMouseEnter: func(core.MouseEvent) { m.hover(panel, true) },
+			OnMouseLeave: func(core.MouseEvent) { m.hover(panel, false) },
+			Children: []core.Node{
+				core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 8}, Children: []core.Node{
+					popupChip(panelCx, domain.ItemTask),
+					core.Text{Content: title, Style: ui.TypeTitle, StyleFunc: ui.Colored(colors.Text)},
+				}},
+				core.Text{Content: description, MaxLines: 2, Style: ui.TypeCaption, StyleFunc: ui.Colored(colors.Muted)},
+			},
+		}
+	})
+	if panel.window == nil {
+		return
+	}
+	m.active = append(m.active, panel)
+	m.layout()
 }
 
 func (m *MessagePopupManager) show(change domain.Change, duration time.Duration) {

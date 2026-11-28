@@ -63,7 +63,7 @@ func newWorkbenchRuntime(cx *core.Scope, data *core.Signal[ui.WorkbenchData], se
 		data:        data,
 		selectedKey: selectedKey,
 		showWindow:  showWindow,
-		popups:      ui.NewMessagePopupManager(cx, func(key string) { selectedKey.Set(key); showWindow() }),
+		popups:      ui.NewMessagePopupManager(cx, func(key string) { selectedKey.Set(key); showWindow() }, showWindow),
 		credentials: security.SecretsCredentialStore{Secrets: cx.Secrets()},
 		statePath:   filepath.Join(cx.DataDir(), "state.json"),
 		ctx:         ctx,
@@ -174,6 +174,9 @@ func (r *workbenchRuntime) loadSavedCredentials() {
 		return
 	}
 	r.installController(controller, account)
+	// 启动即渲染持久化快照：账号巨大时首轮全量刷新要数分钟，
+	// 界面不应停留在空列表等待。
+	snapshot := controller.CurrentSnapshot()
 	r.cx.Post(func() {
 		r.data.Update(func(data ui.WorkbenchData) ui.WorkbenchData {
 			data.Account = account
@@ -181,6 +184,12 @@ func (r *workbenchRuntime) loadSavedCredentials() {
 			data.Connected = false
 			data.Loading = true
 			data.ErrorMessage = ""
+			data.Items = snapshotItems(snapshot.Items)
+			data.Changes = nil
+			data.LastSuccess = snapshot.LastSuccess
+			data.PollSeconds = snapshot.PollSeconds
+			data.NotificationsEnabled = snapshot.NotificationsEnabled
+			data.PopupSeconds = snapshot.PopupSeconds
 			return data
 		})
 	})

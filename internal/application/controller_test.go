@@ -16,6 +16,9 @@ import (
 type fakeGateway struct {
 	mu            sync.Mutex
 	items         []domain.Item
+	updatedItems  []domain.Item
+	updatedErr    error
+	updatedCalls  int
 	fetchErrors   []error
 	loginErrors   []error
 	loginCalls    int
@@ -36,6 +39,26 @@ func (g *fakeGateway) Login(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (g *fakeGateway) FetchAssignedItemsUpdatedSince(ctx context.Context, since time.Time) ([]domain.Item, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.updatedCalls++
+	if len(g.fetchErrors) > 0 {
+		err := g.fetchErrors[0]
+		g.fetchErrors = g.fetchErrors[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
+	if g.updatedErr != nil {
+		return nil, g.updatedErr
+	}
+	if g.updatedItems != nil {
+		return append([]domain.Item(nil), g.updatedItems...), nil
+	}
+	return append([]domain.Item(nil), g.items...), nil
 }
 
 func (g *fakeGateway) FetchAssignedItems(ctx context.Context) ([]domain.Item, error) {
@@ -176,7 +199,10 @@ func TestRefreshNotifiesForNewAndStatusChangesAfterSave(t *testing.T) {
 	notifier := &fakeNotifier{}
 	notifier.hook = func() {
 		saved, saveCalls := store.state()
-		if saveCalls != 1 || saved.Items[updatedTask.Key()].Status != "done" {
+		if _, exists := saved.Items[updatedTask.Key()]; exists {
+			t.Errorf("Notify() ran before the finished task was removed from the index")
+		}
+		if saveCalls != 1 || saved.Items[newBug.Key()].Status != "active" {
 			t.Errorf("Notify() ran before updated snapshot was saved")
 		}
 	}
@@ -393,8 +419,8 @@ func TestConcurrentRefreshIsSerialized(t *testing.T) {
 		}
 	}
 	loginCalls, fetchCalls := gateway.counts()
-	if loginCalls != 1 || fetchCalls != 2 {
-		t.Errorf("gateway calls = (%d logins, %d fetches), want (1, 2)", loginCalls, fetchCalls)
+	if loginCalls != 1 || fetchCalls+gateway.updatedCalls != 2 {
+		t.Errorf("gateway calls = (%d logins, %d fetches, %d incremental), want (1, 2 total)", loginCalls, fetchCalls, gateway.updatedCalls)
 	}
 }
 
@@ -617,8 +643,8 @@ func TestRefreshRepeatedSessionExpiryDoesNotSaveOrNotify(t *testing.T) {
 		t.Fatalf("Refresh() error = %v, want session expiry", err)
 	}
 	loginCalls, fetchCalls := gateway.counts()
-	if loginCalls != 2 || fetchCalls != 2 {
-		t.Errorf("gateway calls = (%d logins, %d fetches), want (2, 2)", loginCalls, fetchCalls)
+	if loginCalls != 2 || fetchCalls+gateway.updatedCalls != 2 {
+		t.Errorf("gateway calls = (%d logins, %d fetches, %d incremental), want (2, 2 total)", loginCalls, fetchCalls, gateway.updatedCalls)
 	}
 	if _, saveCalls := store.state(); saveCalls != 0 {
 		t.Errorf("Save() calls = %d, want 0", saveCalls)
@@ -634,8 +660,8 @@ func TestRefreshRepeatedSessionExpiryDoesNotSaveOrNotify(t *testing.T) {
 		t.Fatalf("Refresh() after repeated expiry error = %v", err)
 	}
 	loginCalls, fetchCalls = gateway.counts()
-	if loginCalls != 3 || fetchCalls != 3 {
-		t.Errorf("gateway calls after recovery = (%d logins, %d fetches), want (3, 3)", loginCalls, fetchCalls)
+	if loginCalls != 3 || fetchCalls+gateway.updatedCalls != 3 {
+		t.Errorf("gateway calls after recovery = (%d logins, %d fetches, %d incremental), want (3, 3 total)", loginCalls, fetchCalls, gateway.updatedCalls)
 	}
 }
 
@@ -662,8 +688,8 @@ func TestRefreshSessionExpiryLogsInOnceAndRetries(t *testing.T) {
 		t.Errorf("Refresh() changes = %#v, want %#v", result.Changes, want)
 	}
 	loginCalls, fetchCalls := gateway.counts()
-	if loginCalls != 2 || fetchCalls != 2 {
-		t.Errorf("gateway calls = (%d logins, %d fetches), want (2, 2)", loginCalls, fetchCalls)
+	if loginCalls != 2 || fetchCalls+gateway.updatedCalls != 2 {
+		t.Errorf("gateway calls = (%d logins, %d fetches, %d incremental), want (2, 2 total)", loginCalls, fetchCalls, gateway.updatedCalls)
 	}
 	if _, saveCalls := store.state(); saveCalls != 1 {
 		t.Errorf("Save() calls = %d, want 1", saveCalls)

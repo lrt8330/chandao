@@ -23,6 +23,17 @@ dev:
   # true, the default, rebuilds and restarts on save; false runs once and exits with the app.
   hot_reload: true
 
+# 依赖许可策略：modernc.org/sqlite（通知历史存储，纯 Go）为 MPL-2.0，
+# 其内部模块的许可文本工具不识别——按警告放行，许可全文仍进 THIRD_PARTY_NOTICES。
+licenses:
+  unknown: warn
+  copyleft: warn
+  allow:
+    - modernc.org/sqlite
+    - modernc.org/memory
+    - modernc.org/mathutil
+    - modernc.org/libc
+
 build:
   output: dist
   # true opens the output directory after building.

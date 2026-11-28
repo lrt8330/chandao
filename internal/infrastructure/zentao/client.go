@@ -133,6 +133,28 @@ func (c *Client) FetchAssignedBugsPage(ctx context.Context, pageID, recPerPage i
 	return c.fetchAssignedPage(ctx, assignedPagePath("bug", pageID, recPerPage))
 }
 
+// FetchAssignedPage 返回一页按指定排序的当前用户指派事项原始数据。
+// orderBy 仅允许禅道支持的排序关键字，避免拼接进查询串。
+func (c *Client) FetchAssignedPage(ctx context.Context, objectType string, pageID, recPerPage int, orderBy string) ([]byte, error) {
+	if pageID <= 0 || recPerPage <= 0 {
+		return nil, ErrInvalidPagination
+	}
+	switch orderBy {
+	case "id_desc", "lastEditedDate_desc", "openedDate_desc":
+	default:
+		return nil, ErrInvalidPagination
+	}
+	return c.fetchAssignedPage(ctx, assignedPagePathOrdered(objectType, orderBy, pageID, recPerPage))
+}
+
+func assignedPagePathOrdered(objectType, orderBy string, pageID, recPerPage int) string {
+	method := objectType
+	if objectType != "bug" {
+		method = "task"
+	}
+	return fmt.Sprintf("index.php?m=my&f=%s&browseType=assignedTo&param=0&orderBy=%s&recTotal=0&recPerPage=%d&pageID=%d", method, url.QueryEscape(orderBy), recPerPage, pageID)
+}
+
 func assignedPagePath(objectType string, pageID, recPerPage int) string {
 	method := "task"
 	if objectType == "bug" {

@@ -48,11 +48,37 @@ func ParseAssignedBugs(body []byte, pageURL string) ([]domain.Item, error) {
 	})
 }
 
+// ParseAssignedTasksWithFinished extracts tasks of every status from an
+// assigned-to page. Incremental sync needs finished rows so the caller can
+// remove them from its local index.
+func ParseAssignedTasksWithFinished(body []byte, pageURL string) ([]domain.Item, error) {
+	return parseAssigned(body, pageURL, assignedSpec{
+		tableID:         "tasktable",
+		objectType:      "task",
+		itemType:        domain.ItemTask,
+		titleClasses:    []string{"c-name", "c-title"},
+		includeFinished: true,
+	})
+}
+
+// ParseAssignedBugsWithFinished extracts bugs of every status from an
+// assigned-to page.
+func ParseAssignedBugsWithFinished(body []byte, pageURL string) ([]domain.Item, error) {
+	return parseAssigned(body, pageURL, assignedSpec{
+		tableID:         "bugList",
+		objectType:      "bug",
+		itemType:        domain.ItemBug,
+		titleClasses:    []string{"c-title", "c-name"},
+		includeFinished: true,
+	})
+}
+
 type assignedSpec struct {
-	tableID      string
-	objectType   string
-	itemType     domain.ItemType
-	titleClasses []string
+	tableID         string
+	objectType      string
+	itemType        domain.ItemType
+	titleClasses    []string
+	includeFinished bool
 }
 
 // HasMorePages reports whether recTotal exceeds recPerPage. It does not fetch
@@ -262,13 +288,16 @@ func parseAssigned(body []byte, pageURL string, spec assignedSpec) ([]domain.Ite
 			return nil, fmt.Errorf("%s row %d: %w: %s", spec.objectType, index+1, ErrDuplicateItemID, item.ID)
 		}
 		seen[item.ID] = struct{}{}
-		unfinished, err := spec.unfinished(item.Status)
-		if err != nil {
-			return nil, fmt.Errorf("%s row %d: %w", spec.objectType, index+1, err)
+		if !spec.includeFinished {
+			unfinished, err := spec.unfinished(item.Status)
+			if err != nil {
+				return nil, fmt.Errorf("%s row %d: %w", spec.objectType, index+1, err)
+			}
+			if !unfinished {
+				continue
+			}
 		}
-		if unfinished {
-			items = append(items, item)
-		}
+		items = append(items, item)
 	}
 	if pagination.hasTotal {
 		pageOffset := pageID - 1
@@ -373,13 +402,16 @@ func parseDtableAssigned(base *url.URL, config string, pagination paginationMeta
 			return nil, fmt.Errorf("%s row %d: %w: %s", spec.objectType, index+1, ErrDuplicateItemID, item.ID)
 		}
 		seen[item.ID] = struct{}{}
-		unfinished, err := spec.unfinished(item.Status)
-		if err != nil {
-			return nil, fmt.Errorf("%s row %d: %w", spec.objectType, index+1, err)
+		if !spec.includeFinished {
+			unfinished, err := spec.unfinished(item.Status)
+			if err != nil {
+				return nil, fmt.Errorf("%s row %d: %w", spec.objectType, index+1, err)
+			}
+			if !unfinished {
+				continue
+			}
 		}
-		if unfinished {
-			items = append(items, item)
-		}
+		items = append(items, item)
 	}
 
 	if pagination.hasTotal {

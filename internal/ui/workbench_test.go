@@ -850,3 +850,34 @@ func workbenchTestOptions(opts ...nsgotest.Option) []nsgotest.Option {
 	}
 	return append(options, opts...)
 }
+
+func TestWorkbenchGroupsThousandItemsByProject(t *testing.T) {
+	const total = 1000
+	items := make([]domain.Item, total)
+	projects := []string{"云平台", "移动端", "开放平台", "数据中台", "桌面端", "中台服务", "工具链", "官网", "小程序", "插件市场"}
+	for index := range items {
+		id := strconv.Itoa(index + 1)
+		items[index] = domain.Item{
+			ID:        id,
+			Type:      domain.ItemTask,
+			Title:     "记录 " + id,
+			Project:   projects[index%len(projects)],
+			Status:    "doing",
+			UpdatedAt: time.Date(2026, 11, 28, 10, 0, 0, 0, time.Local).Format(time.RFC3339),
+		}
+	}
+	app := startWorkbench(t, WorkbenchProps{Data: WorkbenchData{Connected: true, Items: items}})
+	app.Find("text:1000 条记录")
+	// 分组头按项目出现，首组在首屏可见；末行在滚动前不构建。
+	app.Find("id:project-group-云平台")
+	if app.Exists("label:记录 1000") {
+		t.Fatal("last row was built before it was visible")
+	}
+	app.Press("label:记录 1")
+	app.Key("end")
+	app.Find("label:记录 1000")
+	// 每个项目的分组头唯一存在。
+	for _, project := range projects {
+		app.Find("id:project-group-" + project)
+	}
+}

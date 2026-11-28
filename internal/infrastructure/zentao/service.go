@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
+	"time"
 
 	"chandao/zentaotray/internal/application"
 	"chandao/zentaotray/internal/domain"
@@ -13,12 +15,18 @@ import (
 
 const (
 	serviceRecPerPage = 100
-	maxServicePages   = 100
+	// maxServicePages 支撑超大账号（如 10 万条指派 = 1000 页）并保留
+	// 防失控上限。
+	maxServicePages = 2000
+	// incrementalPageBudget 限制单次增量同步的页数：正常增量只有几页；
+	// 超预算说明变化面过大，调用方应回退全量对账。
+	incrementalPageBudget = 50
 )
 
 var (
-	ErrConflictingDuplicate = errors.New("conflicting duplicate zentao item")
-	ErrPageLimitExceeded    = errors.New("zentao pagination exceeded 100 pages")
+	ErrConflictingDuplicate      = errors.New("conflicting duplicate zentao item")
+	ErrPageLimitExceeded         = errors.New("zentao pagination exceeded page budget")
+	ErrIncrementalBudgetExceeded = errors.New("incremental sync exceeded page budget")
 )
 
 // Service aggregates all assigned task and bug pages into one snapshot.
@@ -34,6 +42,92 @@ func NewService(client *Client) *Service {
 // Login delegates session establishment to the HTTP client.
 func (s *Service) Login(ctx context.Context) error {
 	return s.client.Login(ctx)
+}
+
+// FetchAssignedItemsUpdatedSince 增量抓取 lastEditedDate 晚于 since 的指派
+// 事项（含已完成状态，调用方据此从本地索引移除终结事项）。按
+// lastEditedDate 倒序翻页，出现整页均不晚于 since、或不足一页、或超出
+// 页预算时停止；超预算返回 ErrIncrementalBudgetExceeded。
+func (s *Service) FetchAssignedItemsUpdatedSince(ctx context.Context, since time.Time) ([]domain.Item, error) {
+	tasks, err := s.fetchPagesSince(ctx, "task", since)
+	if err != nil {
+		return nil, err
+	}
+	bugs, err := s.fetchPagesSince(ctx, "bug", since)
+	if err != nil {
+		return nil, err
+	}
+	itemsByKey := make(map[string]domain.Item, len(tasks)+len(bugs))
+	for _, items := range [][]domain.Item{tasks, bugs} {
+		for _, item := range items {
+			itemsByKey[item.Key()] = item
+		}
+	}
+	items := make([]domain.Item, 0, len(itemsByKey))
+	for _, item := range itemsByKey {
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Key() < items[j].Key() })
+	return items, nil
+}
+
+func (s *Service) fetchPagesSince(ctx context.Context, objectType string, since time.Time) ([]domain.Item, error) {
+	var all []domain.Item
+	for pageID := 1; pageID <= incrementalPageBudget; pageID++ {
+		body, err := s.client.FetchAssignedPage(ctx, objectType, pageID, serviceRecPerPage, "lastEditedDate_desc")
+		if err != nil {
+			return nil, fmt.Errorf("fetch updated %s page %d: %w", objectType, pageID, serviceError(err))
+		}
+		pageURL := s.client.BaseURL + assignedPagePathOrdered(objectType, "lastEditedDate_desc", pageID, serviceRecPerPage)
+		items, err := parseUpdatedPage(body, pageURL, objectType)
+		if err != nil && !errors.Is(err, ErrPaginationRequired) {
+			return nil, fmt.Errorf("parse updated %s page %d: %w", objectType, pageID, serviceError(err))
+		}
+		all = append(all, items...)
+		if len(items) < serviceRecPerPage {
+			return all, nil
+		}
+		if oldest := oldestLastEdited(items); !oldest.After(since) {
+			return all, nil
+		}
+	}
+	return nil, ErrIncrementalBudgetExceeded
+}
+
+// parseUpdatedPage 解析一页含全部状态的事项行。
+func parseUpdatedPage(body []byte, pageURL string, objectType string) ([]domain.Item, error) {
+	if objectType == "bug" {
+		return ParseAssignedBugsWithFinished(body, pageURL)
+	}
+	return ParseAssignedTasksWithFinished(body, pageURL)
+}
+
+// oldestLastEdited 返回一页中最早的 lastEditedDate；无法解析的条目视为
+// 仍然新鲜（保守地继续翻页）。
+func oldestLastEdited(items []domain.Item) time.Time {
+	oldest := time.Now().Add(time.Hour)
+	found := false
+	for _, item := range items {
+		if parsed, ok := parseLastEdited(item.UpdatedAt); ok {
+			if !found || parsed.Before(oldest) {
+				oldest, found = parsed, true
+			}
+		}
+	}
+	if !found {
+		return time.Now().Add(time.Hour)
+	}
+	return oldest
+}
+
+func parseLastEdited(value string) (time.Time, bool) {
+	value = strings.TrimSpace(value)
+	for _, layout := range []string{"2006-01-02 15:04:05", "2006-01-02 15:04", "2006-01-02"} {
+		if parsed, err := time.ParseInLocation(layout, value, time.Local); err == nil {
+			return parsed, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // FetchAssignedItems returns a complete, deduplicated snapshot sorted by item key.
@@ -99,6 +193,9 @@ func (s *Service) fetchPages(
 func serviceError(err error) error {
 	if errors.Is(err, ErrSessionExpired) {
 		return application.ErrSessionExpired
+	}
+	if errors.Is(err, ErrIncrementalBudgetExceeded) {
+		return application.ErrIncrementalBudgetExceeded
 	}
 	return err
 }

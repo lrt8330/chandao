@@ -11,9 +11,10 @@ import (
 )
 
 var (
-	ErrSessionExpired  = errors.New("session expired")
-	ErrStateLoad       = errors.New("load application state")
-	ErrInvalidSettings = errors.New("invalid settings")
+	ErrSessionExpired            = errors.New("session expired")
+	ErrIncrementalBudgetExceeded = errors.New("incremental sync exceeded page budget")
+	ErrStateLoad                 = errors.New("load application state")
+	ErrInvalidSettings           = errors.New("invalid settings")
 )
 
 // RefreshResult is the snapshot and changes produced by a successful refresh.
@@ -21,6 +22,13 @@ type RefreshResult struct {
 	Snapshot Snapshot
 	Changes  []domain.Change
 }
+
+// reconcileEvery 每隔多少次成功刷新做一次全量对账，纠正增量可能错过
+// 的删除与漂移。
+const reconcileEvery = 20
+
+// syncSafetyMargin 覆盖禅道时间戳精度与时钟偏差。
+const syncSafetyMargin = 2 * time.Minute
 
 // Controller coordinates authenticated polling, local state, and notifications.
 type Controller struct {
@@ -31,6 +39,7 @@ type Controller struct {
 	notifier        Notifier
 	snapshot        Snapshot
 	loggedIn        bool
+	reconciles      int
 	cancel          context.CancelFunc
 	done            chan struct{}
 	settingsChanged chan struct{}
@@ -159,7 +168,22 @@ func (c *Controller) pollInterval() time.Duration {
 	return time.Duration(c.snapshot.PollSeconds) * time.Second
 }
 
-// Refresh fetches assigned items and persists a new baseline before reporting changes.
+// CurrentSnapshot returns a copy of the current snapshot so the interface
+// can render persisted items before the first refresh completes.
+func (c *Controller) CurrentSnapshot() Snapshot {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	snapshot := c.snapshot
+	snapshot.Items = make(map[string]domain.Item, len(c.snapshot.Items))
+	for key, item := range c.snapshot.Items {
+		snapshot.Items[key] = item
+	}
+	return snapshot
+}
+
+// Refresh fetches assigned items and persists a new baseline before reporting
+// changes. 已建立基线后默认走增量同步（只抓变动条目，秒级完成）；每
+// reconcileEvery 轮或增量超预算时回退全量对账。
 func (c *Controller) Refresh(ctx context.Context) (RefreshResult, error) {
 	c.refreshMu.Lock()
 	if err := ctx.Err(); err != nil {
@@ -175,30 +199,82 @@ func (c *Controller) Refresh(ctx context.Context) (RefreshResult, error) {
 		c.loggedIn = true
 	}
 
-	items, err := c.gateway.FetchAssignedItems(ctx)
-	if errors.Is(err, ErrSessionExpired) {
-		c.loggedIn = false
-		if err := c.gateway.Login(ctx); err != nil {
-			c.refreshMu.Unlock()
-			return RefreshResult{}, fmt.Errorf("re-login: %w", err)
-		}
-		c.loggedIn = true
-		items, err = c.gateway.FetchAssignedItems(ctx)
+	useIncremental := c.snapshot.Initialized && c.reconciles < reconcileEvery
+	var items []domain.Item
+	if useIncremental {
+		fetched, err := c.gateway.FetchAssignedItemsUpdatedSince(ctx, c.snapshot.LastSuccess.Add(-syncSafetyMargin))
 		if errors.Is(err, ErrSessionExpired) {
 			c.loggedIn = false
+			if err := c.gateway.Login(ctx); err != nil {
+				c.refreshMu.Unlock()
+				return RefreshResult{}, fmt.Errorf("re-login: %w", err)
+			}
+			c.loggedIn = true
+			fetched, err = c.gateway.FetchAssignedItemsUpdatedSince(ctx, c.snapshot.LastSuccess.Add(-syncSafetyMargin))
+			if errors.Is(err, ErrSessionExpired) {
+				c.loggedIn = false
+			}
+		}
+		if errors.Is(err, ErrIncrementalBudgetExceeded) {
+			useIncremental = false
+		} else if err != nil {
+			c.refreshMu.Unlock()
+			return RefreshResult{}, fmt.Errorf("fetch updated items: %w", err)
+		} else {
+			items = fetched
 		}
 	}
-	if err != nil {
-		c.refreshMu.Unlock()
-		return RefreshResult{}, fmt.Errorf("fetch assigned items: %w", err)
+	if !useIncremental {
+		var err error
+		items, err = c.fetchAllAssigned(ctx)
+		if err != nil {
+			c.refreshMu.Unlock()
+			return RefreshResult{}, err
+		}
 	}
+
 	current := make(map[string]domain.Item, len(items))
 	for _, item := range items {
 		current[item.Key()] = item
 	}
-	changes := domain.DetectChanges(c.snapshot.Items, current, !c.snapshot.Initialized)
+
+	var changes []domain.Change
 	snapshot := c.snapshot
-	snapshot.Items = current
+	if useIncremental {
+		// 增量合并走 copy-on-write：共享的 Items map 不能原地改，
+		// 否则 Save 失败时内存基线也会被污染。
+		merged := make(map[string]domain.Item, len(snapshot.Items)+len(current))
+		for key, item := range snapshot.Items {
+			merged[key] = item
+		}
+		// 未完成条目 upsert 并按 DetectChanges 报告新增/状态变化；终结
+		// 条目报告状态变化后从索引移除（索引只保留未完成，与全量语义
+		// 一致）；首次出现的终结条目既不入索引也不通知。
+		previousSub := make(map[string]domain.Item, len(current))
+		currentSub := make(map[string]domain.Item, len(current))
+		for key, item := range current {
+			_, tracked := merged[key]
+			if domain.Finished(item.Status) && !tracked {
+				continue
+			}
+			if tracked {
+				previousSub[key] = merged[key]
+			}
+			currentSub[key] = item
+			if domain.Finished(item.Status) {
+				delete(merged, key)
+				continue
+			}
+			merged[key] = item
+		}
+		changes = domain.DetectChanges(previousSub, currentSub, false)
+		snapshot.Items = merged
+		c.reconciles++
+	} else {
+		changes = domain.DetectChanges(snapshot.Items, current, !snapshot.Initialized)
+		snapshot.Items = current
+		c.reconciles = 0
+	}
 	snapshot.LastSuccess = time.Now()
 	snapshot.Initialized = true
 	if err := snapshot.Validate(); err != nil {
@@ -215,4 +291,24 @@ func (c *Controller) Refresh(ctx context.Context) (RefreshResult, error) {
 		c.notifier.Notify(ctx, changes)
 	}
 	return RefreshResult{Snapshot: snapshot, Changes: changes}, nil
+}
+
+// fetchAllAssigned 处理登录、会话过期重试与全量抓取。
+func (c *Controller) fetchAllAssigned(ctx context.Context) ([]domain.Item, error) {
+	items, err := c.gateway.FetchAssignedItems(ctx)
+	if errors.Is(err, ErrSessionExpired) {
+		c.loggedIn = false
+		if err := c.gateway.Login(ctx); err != nil {
+			return nil, fmt.Errorf("re-login: %w", err)
+		}
+		c.loggedIn = true
+		items, err = c.gateway.FetchAssignedItems(ctx)
+		if errors.Is(err, ErrSessionExpired) {
+			c.loggedIn = false
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("fetch assigned items: %w", err)
+	}
+	return items, nil
 }

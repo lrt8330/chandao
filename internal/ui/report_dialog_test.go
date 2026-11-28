@@ -46,12 +46,18 @@ func TestReportWindowShowsTrendAndEvents(t *testing.T) {
 	app.Find("text:事件明细")
 	app.Find(`text:"报表验证缺陷"`)
 
-	// 类型筛选：只看新增时状态变化事件应消失。
+	// 类型筛选：只看新增时状态变化事件应消失，且选中态要跟随。
 	app.Press("id:report-kind-new")
 	app.Settle()
 	app.Find("text:报表验证缺陷")
 	if app.Exists("text:报表验证任务") {
 		t.Fatal("status event remains after filtering to new")
+	}
+	if newTab := app.Find("id:report-kind-new"); !newTab.Props.Selected {
+		t.Fatalf("new tab not selected after press: %+v", newTab.Props)
+	}
+	if allTab := app.Find("id:report-kind-all"); allTab.Props.Selected {
+		t.Fatal("all tab still selected after switching to new")
 	}
 
 	// 切回全部，两条都在。

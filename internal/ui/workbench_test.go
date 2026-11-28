@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -142,10 +143,19 @@ func TestWorkbenchLoginShowsErrorAndFitsNarrowScreen(t *testing.T) {
 }
 
 func TestWorkbenchShowsLoadingAndErrorStates(t *testing.T) {
-	t.Run("loading", func(t *testing.T) {
-		app := startWorkbench(t, WorkbenchProps{Data: WorkbenchData{Connected: true, Loading: true, Items: testItems()}})
+	t.Run("initial loading", func(t *testing.T) {
+		app := startWorkbench(t, WorkbenchProps{Data: WorkbenchData{Loading: true}})
 		app.Find("id:loading-state")
-		app.Find("text:正在加载禅道数据…")
+		if app.Exists("id:empty-state") {
+			t.Fatal("empty state during initial load")
+		}
+	})
+	t.Run("background refresh", func(t *testing.T) {
+		app := startWorkbench(t, WorkbenchProps{Data: WorkbenchData{Connected: true, Loading: true, Items: testItems()}})
+		if app.Exists("id:loading-state") {
+			t.Fatal("cached rows must stay visible without skeletons")
+		}
+
 		refresh := app.Find("id:refresh")
 		if !refresh.Props.Disabled || !refresh.Props.Busy {
 			t.Fatalf("refresh disabled = %v, busy = %v; want both true", refresh.Props.Disabled, refresh.Props.Busy)
@@ -170,7 +180,7 @@ func TestWorkbenchShowsEmptyStates(t *testing.T) {
 	t.Run("no assigned items", func(t *testing.T) {
 		app := startWorkbench(t, WorkbenchProps{Data: WorkbenchData{Connected: true}})
 		app.Find("id:empty-state")
-		app.Find("text:暂无待办任务和 Bug")
+		app.Find("text:暂无指派给我的事项")
 	})
 
 	t.Run("no filter matches", func(t *testing.T) {
@@ -225,14 +235,11 @@ func TestWorkbenchSelectsRowAndOpensZentao(t *testing.T) {
 		t.Fatalf("detail width = %v, want 380", got)
 	}
 	for id, want := range map[string]string{
-		"detail-type":    "任务",
-		"detail-id":      "1",
+		"detail-id":      "#1",
 		"detail-title":   "修复登录页",
 		"detail-project": "Web 平台",
 		"detail-status":  "doing",
 		"detail-updated": "2026-11-27 10:00",
-		"detail-url":     items[0].URL,
-		"detail-key":     items[0].Key(),
 	} {
 		if got := app.Find("id:" + id).Text; got != want {
 			t.Errorf("%s = %q, want %q", id, got, want)
@@ -248,6 +255,8 @@ func TestWorkbenchSelectsRowAndOpensZentao(t *testing.T) {
 	if got := app.Find("id:detail-title").Text; got != items[1].Title {
 		t.Fatalf("detail title after selecting another row = %q, want %q", got, items[1].Title)
 	}
+	app.Press("id:collapse-detail")
+	app.WaitForGone("id:item-detail", time.Second)
 }
 
 func TestWorkbenchFiltersChangesOnly(t *testing.T) {
@@ -283,7 +292,8 @@ func TestWorkbenchFiltersChangesOnly(t *testing.T) {
 }
 
 func TestWorkbenchFiltersByType(t *testing.T) {
-	app := startWorkbench(t, WorkbenchProps{Data: WorkbenchData{Connected: true, Items: testItems()}})
+	items := append(testItems(), domain.Item{ID: "8", Type: domain.ItemStory, Title: "月报导出", Status: "active"})
+	app := startWorkbench(t, WorkbenchProps{Data: WorkbenchData{Connected: true, Items: items}})
 
 	app.Find("id:filter-all")
 	app.Find("id:filter-task")
@@ -301,6 +311,12 @@ func TestWorkbenchFiltersByType(t *testing.T) {
 		t.Fatal("task rows remain after selecting the Bug tab")
 	}
 
+	app.Press("id:filter-story")
+	app.Find("label:月报导出")
+	app.Find("text:#8")
+	if app.Exists("label:登录后白屏") || app.Exists("label:修复登录页") {
+		t.Fatal("non-story in story list")
+	}
 	app.Press("id:filter-all")
 	app.Find("label:修复登录页")
 	app.Find("label:登录后白屏")
@@ -375,7 +391,9 @@ func TestWorkbenchDataFuncUpdatesWithoutResettingFilters(t *testing.T) {
 	app.Find("text:refreshed.account")
 	app.Find("text:未连接")
 	app.Find("text:上次刷新 2026-11-27 19:30")
-	app.Find("id:loading-state")
+	if app.Exists("id:loading-state") {
+		t.Fatal("cached rows must stay visible without skeletons")
+	}
 	app.Find("text:刷新完成，请检查连接")
 	if refresh := app.Find("id:refresh"); !refresh.Props.Disabled || !refresh.Props.Busy {
 		t.Fatalf("refresh disabled/busy after refresh = %v/%v, want true/true", refresh.Props.Disabled, refresh.Props.Busy)
@@ -409,7 +427,7 @@ func TestWorkbenchUsesExternalSelectedKey(t *testing.T) {
 	}
 	for id, want := range map[string]string{
 		"detail-title": items[1].Title,
-		"detail-key":   items[1].Key(),
+		"detail-id":    "#" + items[1].ID,
 	} {
 		if got := app.Find("id:" + id).Text; got != want {
 			t.Errorf("%s = %q, want %q", id, got, want)
@@ -599,7 +617,7 @@ func TestWorkbenchShowsHeaderAndKPIs(t *testing.T) {
 	app.Find("text:rt.liang")
 	app.Find("text:已连接")
 	app.Find("text:上次刷新 2026-11-27 18:30")
-	for _, label := range []string{"我的待办", "本轮动态", "未完成任务", "未解决 Bug", "状态"} {
+	for _, label := range []string{"我的待办", "本轮动态", "未完成任务", "未解决 Bug", "状态变化"} {
 		app.Find("text:" + label)
 	}
 	for id, want := range map[string]string{
@@ -876,8 +894,21 @@ func TestWorkbenchGroupsThousandItemsByProject(t *testing.T) {
 	app.Press("label:记录 1")
 	app.Key("end")
 	app.Find("label:记录 1000")
-	// 每个项目的分组头唯一存在。
-	for _, project := range projects {
-		app.Find("id:project-group-" + project)
+
+}
+
+func TestProjectEntriesKeepInterleavedProjectsTogether(t *testing.T) {
+	items := []domain.Item{{ID: "1", Project: "A"}, {ID: "2", Project: " B "}, {ID: "3", Project: "A"}, {ID: "4"}, {ID: "5", Project: "B"}}
+	got := projectEntries(items)
+	want := []listEntry{{header: true, name: "A", count: 2}, {item: items[0]}, {item: items[2]}, {header: true, name: "B", count: 2}, {item: items[1]}, {item: items[4]}, {header: true, name: "未分组", count: 1}, {item: items[3]}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("grouped entries = %+v, want %+v", got, want)
+	}
+}
+
+func TestWorkbenchKeepsLightCanvasInDarkMode(t *testing.T) {
+	app := startWorkbench(t, WorkbenchProps{}, nsgotest.Environment(core.Environment{OS: core.OSWindows, Idiom: core.IdiomDesktop, Dark: true}))
+	if got := app.Find("id:workbench").Style.Background; got != core.RGB(cloudCanvas) {
+		t.Errorf("dark system canvas = %x", got)
 	}
 }

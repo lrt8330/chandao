@@ -583,7 +583,7 @@ func TestNewControllerRejectsUnloadableOrInvalidState(t *testing.T) {
 	}
 }
 
-func TestRefreshNotificationsDisabledStillSavesChanges(t *testing.T) {
+func TestRefreshNotificationsDisabledStillReportsChanges(t *testing.T) {
 	oldItem := testItem("1", domain.ItemTask, "doing")
 	newItem := testItem("2", domain.ItemBug, "active")
 	snapshot := application.DefaultSnapshot()
@@ -595,6 +595,9 @@ func TestRefreshNotificationsDisabledStillSavesChanges(t *testing.T) {
 	notifier := &fakeNotifier{}
 	controller := newTestController(t, gateway, store, notifier)
 
+	events := &fakeNotifier{}
+	controller.SetOnChanges(events.Notify)
+
 	result, err := controller.Refresh(context.Background())
 	if err != nil {
 		t.Fatalf("Refresh() error = %v", err)
@@ -602,6 +605,9 @@ func TestRefreshNotificationsDisabledStillSavesChanges(t *testing.T) {
 	want := []domain.Change{{Kind: domain.ChangeNew, Item: newItem}}
 	if !reflect.DeepEqual(result.Changes, want) {
 		t.Errorf("Refresh() changes = %#v, want %#v", result.Changes, want)
+	}
+	if got := events.notifications(); !reflect.DeepEqual(got, [][]domain.Change{want}) {
+		t.Errorf("onChanges batches = %#v, want one batch %#v", got, want)
 	}
 	if _, saveCalls := store.state(); saveCalls != 1 {
 		t.Errorf("Save() calls = %d, want 1", saveCalls)
@@ -866,9 +872,39 @@ func TestLargeAccountReconcileThrottledByTime(t *testing.T) {
 	}
 }
 
+func TestRunItemActionRejectsStaleItemBeforeGatewayCall(t *testing.T) {
+	selected := testItem("108", domain.ItemTask, "wait")
+	updated := selected
+	updated.Status = "doing"
+	for _, tc := range []struct {
+		name  string
+		items map[string]domain.Item
+	}{
+		{"removed", itemMap()},
+		{"different status", itemMap(updated)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := application.DefaultSnapshot()
+			snapshot.Initialized = true
+			snapshot.Items = tc.items
+			gateway := &fakeGateway{}
+			controller := newTestController(t, gateway, &fakeStore{snapshot: snapshot}, &fakeNotifier{})
+			if err := controller.RunItemAction(context.Background(), selected, "start"); !errors.Is(err, application.ErrItemChanged) {
+				t.Fatalf("RunItemAction() error = %v, want ErrItemChanged", err)
+			}
+			if gateway.loginCalls != 0 || gateway.actionCalls != 0 {
+				t.Errorf("stale selection caused %d logins and %d actions", gateway.loginCalls, gateway.actionCalls)
+			}
+		})
+	}
+}
+
 // TestControllerRunsItemActionWithSessionRetry 会话过期时重登录并重试一次。
 func TestControllerRunsItemActionWithSessionRetry(t *testing.T) {
-	store := &fakeStore{snapshot: application.DefaultSnapshot()}
+	snapshot := application.DefaultSnapshot()
+	snapshot.Initialized = true
+	snapshot.Items = itemMap(testItem("108", domain.ItemTask, ""))
+	store := &fakeStore{snapshot: snapshot}
 	gateway := &fakeGateway{
 		loginErrors: []error{nil},
 		actionErrs:  []error{application.ErrSessionExpired},
@@ -893,7 +929,10 @@ func TestControllerRunsItemActionWithSessionRetry(t *testing.T) {
 
 // TestControllerRunsItemActionWithoutLogin 首次调用前会先登录。
 func TestControllerRunsItemActionWithoutLogin(t *testing.T) {
-	store := &fakeStore{snapshot: application.DefaultSnapshot()}
+	snapshot := application.DefaultSnapshot()
+	snapshot.Initialized = true
+	snapshot.Items = itemMap(testItem("6", domain.ItemBug, ""))
+	store := &fakeStore{snapshot: snapshot}
 	gateway := &fakeGateway{}
 	controller, err := application.NewController(context.Background(), gateway, store, nil)
 	if err != nil {

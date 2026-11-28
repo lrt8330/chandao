@@ -45,10 +45,10 @@ func NewService(client *Client) *Service {
 func (s *Service) RunItemAction(ctx context.Context, itemType domain.ItemType, id, action string) error {
 	form, err := s.client.FetchActionForm(ctx, string(itemType), action, id)
 	if err != nil {
-		return err
+		return serviceError(err)
 	}
 	if _, err := s.client.SubmitAction(ctx, form, nil); err != nil {
-		return err
+		return serviceError(err)
 	}
 	return nil
 }
@@ -61,8 +61,9 @@ func (s *Service) Login(ctx context.Context) error {
 // FetchAssignedItemsUpdatedSince 增量抓取 lastEditedDate 晚于 since 的指派
 // 事项（含已完成状态，调用方据此从本地索引移除终结事项）。按
 // lastEditedDate 倒序翻页，出现整页均不晚于 since、或不足一页、或超出
-// 页预算时停止；超预算返回 ErrIncrementalBudgetExceeded。需求抓取失败
-// 仅降级（返回任务和 Bug），不阻断整轮刷新。
+// 页预算时停止；超预算返回 ErrIncrementalBudgetExceeded。任一类别（含
+// 需求）抓取失败都返回错误：调用方必须保留上一基线，不能把失败当成
+// 「该类已没有事项」。
 func (s *Service) FetchAssignedItemsUpdatedSince(ctx context.Context, since time.Time) ([]domain.Item, error) {
 	tasks, err := s.fetchPagesSince(ctx, "task", since)
 	if err != nil {
@@ -72,10 +73,9 @@ func (s *Service) FetchAssignedItemsUpdatedSince(ctx context.Context, since time
 	if err != nil {
 		return nil, err
 	}
-	// 需求页与任务/Bug 的列结构存在差异，解析失败时不阻断同步。
-	stories, storyErr := s.fetchPagesSince(ctx, "story", since)
-	if storyErr != nil {
-		stories = nil
+	stories, err := s.fetchPagesSince(ctx, "story", since)
+	if err != nil {
+		return nil, err
 	}
 	itemsByKey := make(map[string]domain.Item, len(tasks)+len(bugs)+len(stories))
 	for _, items := range [][]domain.Item{tasks, bugs, stories} {
@@ -111,7 +111,7 @@ func (s *Service) fetchPagesSince(ctx context.Context, objectType string, since 
 			return all, nil
 		}
 	}
-	return nil, ErrIncrementalBudgetExceeded
+	return nil, serviceError(ErrIncrementalBudgetExceeded)
 }
 
 // parseUpdatedPage 解析一页含全部状态的事项行。
@@ -154,8 +154,8 @@ func parseLastEdited(value string) (time.Time, bool) {
 }
 
 // FetchAssignedItems returns a complete, deduplicated snapshot sorted by item key.
-// Any failure discards all items accumulated during the refresh. 需求抓取
-// 失败仅降级（快照缺需求），不阻断任务和 Bug 的刷新。
+// Any failure discards all items accumulated during the refresh. 需求抓取失败
+// 同样返回错误：调用方保留上一份完整快照，不把失败当成需求已清零。
 func (s *Service) FetchAssignedItems(ctx context.Context) ([]domain.Item, error) {
 	tasks, err := s.fetchPages(ctx, "task", s.client.FetchAssignedTasksPage, ParseAssignedTasks)
 	if err != nil {
@@ -165,10 +165,9 @@ func (s *Service) FetchAssignedItems(ctx context.Context) ([]domain.Item, error)
 	if err != nil {
 		return nil, err
 	}
-	// 需求页与任务/Bug 的列结构存在差异，解析失败时不阻断全量刷新。
-	stories, storyErr := s.fetchPages(ctx, "story", s.client.FetchAssignedStoriesPage, ParseAssignedStories)
-	if storyErr != nil {
-		stories = nil
+	stories, err := s.fetchPages(ctx, "story", s.client.FetchAssignedStoriesPage, ParseAssignedStories)
+	if err != nil {
+		return nil, err
 	}
 
 	itemsByKey := make(map[string]domain.Item, len(tasks)+len(bugs)+len(stories))

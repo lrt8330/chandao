@@ -10,10 +10,8 @@ import (
 	"github.com/nsgo-dev/nsgo/ui"
 )
 
-// 折线图配色：任务=钴蓝、Bug=琥珀，网格与文字用云灰。
+// 折线图配色：任务=钴蓝、Bug=陶红，网格与文字用云灰。
 const (
-	chartTaskColor = "#3157C7"
-	chartBugColor  = "#E9AD58"
 	chartGridColor = "#E2E7ED"
 	chartTextColor = "#657383"
 )
@@ -51,6 +49,8 @@ func trendChart(cx *core.Scope, points []notifyhistory.SnapshotPoint) core.Node 
 			marginL-6, y+4, chartTextColor, label)
 	}
 
+	chartTaskColor := fmt.Sprintf("#%06X", cobaltDark)
+	chartBugColor := fmt.Sprintf("#%06X", bugInk)
 	var taskLine, bugLine, dots strings.Builder
 	last := len(points) - 1
 	for index, point := range points {

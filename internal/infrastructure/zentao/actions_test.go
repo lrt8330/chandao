@@ -2,10 +2,12 @@ package zentao
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -54,7 +56,8 @@ func TestClientActionFormRoundTrip(t *testing.T) {
 			}
 			postedPath = r.URL.RequestURI()
 			posted = r.PostForm
-			fmt.Fprint(w, `<html><body>ok</body></html>`)
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"result":"success","locate":"/biz/index.php?m=my&f=task"}`)
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.String())
 			http.NotFound(w, r)
@@ -84,7 +87,7 @@ func TestClientActionFormRoundTrip(t *testing.T) {
 		"comment":     "",
 	}
 	for key, value := range want {
-		if got := form.Fields[key]; got != value {
+		if got := form.Fields.Get(key); got != value {
 			t.Errorf("form[%q] = %q, want %q", key, got, value)
 		}
 	}
@@ -120,5 +123,169 @@ func TestFetchActionFormRejectsUnknownAction(t *testing.T) {
 	}
 	if _, err := client.FetchActionForm(context.Background(), "user", "start", "1"); err == nil {
 		t.Fatal("unknown object type must be rejected")
+	}
+}
+
+// TestActionRejectsHTTP200BusinessFailure HTTP 200 + 业务失败不能报成功。
+func TestActionRejectsHTTP200BusinessFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want error
+	}{
+		{"json failure", `{"result":"fail","message":"任务状态已变化"}`, ErrActionRejected},
+		{"html validation error", `<html><body><div class="alert alert-danger">请填写预计工时</div></body></html>`, ErrActionRejected},
+		{"html without success marker", `<html><body><p>请稍候</p></body></html>`, ErrActionOutcomeUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := actionFormServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				fmt.Fprint(w, tc.body)
+			})
+			client := actionTestClient(t, server.URL)
+			form, err := client.FetchActionForm(context.Background(), "task", "start", "108")
+			if err != nil {
+				t.Fatalf("FetchActionForm: %v", err)
+			}
+			if _, err := client.SubmitAction(context.Background(), form, nil); !errors.Is(err, tc.want) {
+				t.Fatalf("SubmitAction error = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestActionOutcomeUnknownOnTransportFailure 提交途中断开时不能报成功。
+func TestActionOutcomeUnknownOnTransportFailure(t *testing.T) {
+	server := actionFormServer(t, func(w http.ResponseWriter, r *http.Request) {
+		hijack, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("test server does not support hijacking")
+		}
+		conn, _, err := hijack.Hijack()
+		if err != nil {
+			t.Fatalf("hijack: %v", err)
+		}
+		_ = conn.Close()
+	})
+	client := actionTestClient(t, server.URL)
+	form, err := client.FetchActionForm(context.Background(), "task", "start", "108")
+	if err != nil {
+		t.Fatalf("FetchActionForm: %v", err)
+	}
+	if _, err := client.SubmitAction(context.Background(), form, nil); !errors.Is(err, ErrActionOutcomeUnknown) {
+		t.Fatalf("SubmitAction error = %v, want ErrActionOutcomeUnknown", err)
+	}
+}
+
+// TestActionFormUsesBrowserSemantics 无 action 的表单回到当前页，裸 checked/
+// selected 与多选都按浏览器语义回填。
+func TestActionFormUsesBrowserSemantics(t *testing.T) {
+	page := `<!DOCTYPE html><html><body>
+<form method="post">
+  <input type="hidden" name="taskID" value="108">
+  <input type="checkbox" name="mailto" checked>
+  <input type="checkbox" name="notify" value="1">
+  <select name="solution">
+    <option value="fixed">已修复</option>
+    <option value="duplicate" selected>重复</option>
+  </select>
+  <select name="stages" multiple>
+    <option value="build" selected>构建</option>
+    <option value="test" selected>测试</option>
+  </select>
+</form>
+</body></html>`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case isRefreshRandomRequest(r):
+			fmt.Fprint(w, "123456")
+		case isLoginRequest(r):
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"result":"success"}`)
+		case r.Method == http.MethodGet:
+			fmt.Fprint(w, page)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := actionTestClient(t, server.URL)
+	if err := client.Login(context.Background()); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	form, err := client.FetchActionForm(context.Background(), "task", "start", "108")
+	if err != nil {
+		t.Fatalf("FetchActionForm: %v", err)
+	}
+	if !strings.Contains(form.Path, "m=task") || !strings.Contains(form.Path, "f=start") || !strings.Contains(form.Path, "taskID=108") {
+		t.Fatalf("path = %q, want the current action page", form.Path)
+	}
+	if got := form.Fields.Get("mailto"); got != "on" {
+		t.Errorf("bare checked checkbox = %q, want on", got)
+	}
+	if values := form.Fields["notify"]; len(values) != 0 {
+		t.Errorf("unchecked checkbox submitted %v", values)
+	}
+	if got := form.Fields.Get("solution"); got != "duplicate" {
+		t.Errorf("selected option = %q, want duplicate", got)
+	}
+	if values := form.Fields["stages"]; !reflect.DeepEqual(values, []string{"build", "test"}) {
+		t.Errorf("multiple select = %v, want both selected", values)
+	}
+}
+
+func actionFormServer(t *testing.T, post http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case isRefreshRandomRequest(r):
+			fmt.Fprint(w, "123456")
+		case isLoginRequest(r):
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"result":"success"}`)
+		case r.Method == http.MethodGet:
+			fmt.Fprint(w, startFormPage)
+		case r.Method == http.MethodPost:
+			post(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func actionTestClient(t *testing.T, serverURL string) *Client {
+	t.Helper()
+	client, err := New(serverURL+"/biz/", "tester", "secret")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return client
+}
+
+// 表单把提交目标指向别的站点时必须拒绝，不能带上会话 cookie/token。
+func TestActionFormRejectsExternalTarget(t *testing.T) {
+	page := `<html><body>
+<form method="post" action="https://evil.example/task/start">
+  <input type="hidden" name="verifyRand" value="token-abc">
+</form>
+</body></html>`
+	server := actionFormServer(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("external target must not be submitted")
+	})
+	defer server.Close()
+	client := actionTestClient(t, server.URL)
+	server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case isRefreshRandomRequest(r):
+			fmt.Fprint(w, "123456")
+		case isLoginRequest(r):
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"result":"success"}`)
+		default:
+			fmt.Fprint(w, page)
+		}
+	})
+	if _, err := client.FetchActionForm(context.Background(), "task", "start", "108"); !errors.Is(err, ErrActionFormTarget) {
+		t.Fatalf("FetchActionForm error = %v, want ErrActionFormTarget", err)
 	}
 }

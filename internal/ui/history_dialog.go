@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"chandao/zentaotray/internal/infrastructure/notifyhistory"
@@ -14,12 +15,12 @@ import (
 
 const notificationHistoryLimit = 100
 
+func sameHistoryEntries(a, b []notifyhistory.Entry) bool { return slices.Equal(a, b) }
+
 // notificationHistoryDialog 通知历史对话框：列出最近已通知的变化，支持
 // 一键全部标为已读。数据来自本地 SQLite 通知历史。
 func notificationHistoryDialog(cx *core.Scope, store *notifyhistory.Store, open *core.Signal[bool]) core.Node {
-	entries := core.NewSignalFunc(cx, []notifyhistory.Entry(nil), func(a, b []notifyhistory.Entry) bool {
-		return len(a) == len(b)
-	})
+	entries := core.NewSignalFunc(cx, []notifyhistory.Entry(nil), sameHistoryEntries)
 	unread := core.NewSignal(cx, 0)
 	load := func() {
 		if store == nil {
@@ -52,45 +53,51 @@ func notificationHistoryDialog(cx *core.Scope, store *notifyhistory.Store, open 
 	}
 	close := func() { open.Set(false) }
 
-	// 组件随 Workbench 每次渲染重建：无条件加载一次，保证打开对话框时
-	// 记录与未读计数是最新的。
-	load()
 	description := "最近已通知的变化记录（本地保留，最多 100 条）。"
-	return ui.Dialog{
-		TestID: "notify-history", Title: "通知历史",
-		DescriptionFunc: func() string {
-			if count := unread.Get(); count > 0 {
-				return fmt.Sprintf("未读 %d 条。%s", count, description)
-			}
-			return description
-		},
-		Open: open.Get,
-		OnOpenChange: func(shown bool, _ base.Reason) {
-			if shown {
-				loadOnOpen()
-				return
-			}
-			close()
-		},
-		Style: dialogChrome(cx),
-		Children: []core.Node{
-			ui.ScrollView{
-				Style:        ui.FillRest,
-				ContentStyle: core.Style{Gap: 8, Padding: core.Edges{Right: 4}},
-				Children: []core.Node{core.Dynamic(func(cx *core.Scope) core.Node {
-					return historyList(cx, entries.Get)
-				})},
+	dialog := func() core.Node {
+		return ui.Dialog{
+			TestID: "notify-history", Title: "通知历史",
+			DescriptionFunc: func() string {
+				if count := unread.Get(); count > 0 {
+					return fmt.Sprintf("未读 %d 条。%s", count, description)
+				}
+				return description
 			},
-		},
-		Footer: []core.Node{
-			ui.Button{
-				Text: "全部标为已读", TestID: "mark-notifications-read", Variant: ui.ButtonOutline,
-				Disabled: func() bool { return unread.Get() == 0 },
-				OnPress:  markRead,
+			Open: open.Get,
+			OnOpenChange: func(shown bool, _ base.Reason) {
+				if shown {
+					loadOnOpen()
+					return
+				}
+				close()
 			},
-			ui.Button{Text: "关闭", TestID: "close-notify-history", Variant: ui.ButtonSecondary, OnPress: close},
-		},
+			Style: dialogChrome(cx),
+			Children: []core.Node{
+				ui.ScrollView{
+					Style:        ui.FillRest,
+					ContentStyle: core.Style{Gap: 8, Padding: core.Edges{Right: 4}},
+					Children: []core.Node{core.Dynamic(func(cx *core.Scope) core.Node {
+						return historyList(cx, entries.Get)
+					})},
+				},
+			},
+			Footer: []core.Node{
+				ui.Button{
+					Text: "全部标为已读", TestID: "mark-notifications-read", Variant: ui.ButtonOutline,
+					Disabled: func() bool { return unread.Get() == 0 },
+					OnPress:  markRead,
+				},
+				ui.Button{Text: "关闭", TestID: "close-notify-history", Variant: ui.ButtonSecondary, OnPress: close},
+			},
+		}
 	}
+	// 打开时重读：挂载后新到的通知也能看到；关闭时不查询。
+	return core.Dynamic(func(*core.Scope) core.Node {
+		if open.Get() {
+			load()
+		}
+		return dialog()
+	})
 }
 
 func historyList(cx *core.Scope, entries func() []notifyhistory.Entry) core.Node {

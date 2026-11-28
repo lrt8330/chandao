@@ -2,16 +2,10 @@
 package main
 
 import (
-	"context"
-	"path/filepath"
-	"time"
-
+	"chandao/zentaotray/internal/ui"
 	"github.com/nsgo-dev/nsgo"
 	"github.com/nsgo-dev/nsgo/core"
 	"github.com/nsgo-dev/nsgo/desktop"
-
-	"chandao/zentaotray/internal/infrastructure/notifyhistory"
-	"chandao/zentaotray/internal/ui"
 )
 
 const (
@@ -42,32 +36,30 @@ func mountWorkbench(cx *core.Scope) *workbenchRuntime {
 			window.Focus()
 		}
 	}
-	// 通知历史（SQLite）：打开失败仅降级为无历史，弹窗通知不受影响。
-	history, historyErr := notifyhistory.Open(filepath.Join(cx.DataDir(), "notify.db"))
-	if historyErr != nil {
-		history = nil
-	} else {
-		cx.Cleanup(func() { history.Close() })
-		// 启动时把历史裁剪到最近 1 万条：通知历史同时是报表数据源，
-		// 裁剪防止长期积累无限增长，同时保留足够的回看窗口。
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			_ = history.Trim(ctx, 10000)
-		}()
-	}
-	runtime := newWorkbenchRuntime(cx, data, selectedKey, showWindow, history)
+	runtime := newWorkbenchRuntime(cx, data, selectedKey, showWindow)
 	workbench := func(windowCx *core.Scope) core.Node {
-		return ui.Workbench(windowCx, ui.WorkbenchProps{
-			DataFunc:        data.Get,
-			SelectedKey:     selectedKey,
-			OnLogin:         runtime.login,
-			OnRefresh:       runtime.refresh,
-			OnSettings:      runtime.updateSettings,
-			OnOpenURL:       runtime.openURL,
-			OnOpenReport:    runtime.openReport,
-			OnRunItemAction: runtime.runItemAction,
-			NotifyHistory:   history,
+		// 账号决定历史库与报表窗体：切换账号时重建整棵工作台，旧账号的
+		// 记录、选择与待确认操作随旧作用域一起失效。
+		return core.Dynamic(func(viewCx *core.Scope) core.Node {
+			session := runtime.viewSession.Get()
+			props := ui.WorkbenchProps{
+				DataFunc:        data.Get,
+				SelectedKey:     selectedKey,
+				OnLogin:         runtime.login,
+				OnRefresh:       runtime.refresh,
+				OnSettings:      runtime.updateSettings,
+				OnOpenURL:       runtime.openURL,
+				OnOpenReport:    runtime.openReport,
+				OnRunItemAction: runtime.runItemAction,
+			}
+			var view core.Node
+			viewCx.Untrack(func() {
+				if session != nil {
+					props.NotifyHistory = session.history
+				}
+				view = ui.Workbench(viewCx, props)
+			})
+			return view
 		})
 	}
 

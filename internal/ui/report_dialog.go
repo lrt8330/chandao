@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -34,6 +35,17 @@ type ReportWindow struct {
 
 func NewReportWindow(cx *core.Scope, store *notifyhistory.Store) *ReportWindow {
 	return &ReportWindow{cx: cx, store: store}
+}
+
+// Close 关闭报表窗体（切换账号时丢弃旧账号的数据视图）。
+func (w *ReportWindow) Close() {
+	if w == nil {
+		return
+	}
+	if w.window != nil && !w.window.Closed() {
+		w.window.Close()
+	}
+	w.window = nil
 }
 
 // Open 显示报表窗体：不存在则创建，已存在则显示并聚焦。Key 机制保证
@@ -76,6 +88,12 @@ func (r reportRange) window() time.Duration {
 	return 0 // 全部
 }
 
+func sameReportEntries(a, b []notifyhistory.Entry) bool { return slices.Equal(a, b) }
+
+func sameReportPoints(a, b []notifyhistory.SnapshotPoint) bool { return slices.Equal(a, b) }
+
+func sameReportStats(a, b []notifyhistory.EventStatsRow) bool { return slices.Equal(a, b) }
+
 func (r reportRange) label() string {
 	switch r {
 	case reportRange7:
@@ -89,16 +107,13 @@ func (r reportRange) label() string {
 // reportWindowBody 是报表窗体的全部内容：标题行、工具行、趋势卡、变化
 // 统计卡与事件明细卡。加载在组件构建与范围/类型/关键字变化时执行。
 func reportWindowBody(cx *core.Scope, store *notifyhistory.Store, onClose func()) core.Node {
+	cx.SetTheme(workbenchTheme())
 	rangeSignal := core.NewSignal(cx, reportRange7)
-	entries := core.NewSignalFunc(cx, []notifyhistory.Entry(nil), func(a, b []notifyhistory.Entry) bool {
-		return len(a) == len(b)
-	})
-	points := core.NewSignalFunc(cx, []notifyhistory.SnapshotPoint(nil), func(a, b []notifyhistory.SnapshotPoint) bool {
-		return len(a) == len(b)
-	})
-	stats := core.NewSignalFunc(cx, []notifyhistory.EventStatsRow(nil), func(a, b []notifyhistory.EventStatsRow) bool {
-		return len(a) == len(b)
-	})
+	// 比较内容而非只比条数：不同筛选可能返回同样多的行，只比长度会把
+	// 上一组结果显示在新筛选标签下。
+	entries := core.NewSignalFunc(cx, []notifyhistory.Entry(nil), sameReportEntries)
+	points := core.NewSignalFunc(cx, []notifyhistory.SnapshotPoint(nil), sameReportPoints)
+	stats := core.NewSignalFunc(cx, []notifyhistory.EventStatsRow(nil), sameReportStats)
 	keyword := core.NewSignal(cx, "")
 	kindFilter := core.NewSignal(cx, "")
 
@@ -231,7 +246,7 @@ func compositionMeters(cx *core.Scope, points []notifyhistory.SnapshotPoint) cor
 			Style:  core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 10, MinWidth: core.Pt(0)},
 			Children: []core.Node{
 				core.Text{Content: label, Style: ui.TypeCaption.Merge(core.Style{Width: core.Pt(32), FlexShrink: 0}), StyleFunc: ui.Colored(colors.Muted)},
-				ui.Meter{Value: func() float64 { return share }, Variant: variant},
+				core.View{Style: ui.FillRest, Children: []core.Node{ui.Meter{Value: func() float64 { return share }, Variant: variant}}},
 				core.Text{
 					Content: fmt.Sprintf("%d · %.0f%%", count, share*100),
 					Style:   ui.TypeCaption.Merge(core.Style{FontFamily: Mono, Width: core.Pt(72), FlexShrink: 0}),
@@ -245,8 +260,8 @@ func compositionMeters(cx *core.Scope, points []notifyhistory.SnapshotPoint) cor
 		}
 	}
 	return core.View{Style: core.Style{Gap: 8}, Children: []core.Node{
-		row("任务", latest.TasksTotal, ui.MeterAccent),
-		row("Bug", latest.BugsActive, ui.MeterDanger),
+		row("任务", latest.TasksTotal, ui.MeterInfo),
+		row("Bug", latest.BugsActive, ui.MeterDown),
 	}}
 }
 

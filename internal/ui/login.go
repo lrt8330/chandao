@@ -35,7 +35,7 @@ func loginPanel(cx *core.Scope, props WorkbenchProps) core.Node {
 		},
 		Children: []core.Node{
 			core.Dynamic(func(cx *core.Scope) core.Node {
-				if cx.Env().Window().Width < 720 {
+				if cx.Env().Window().Width < 860 {
 					return core.Group{card}
 				}
 				return core.View{
@@ -56,13 +56,14 @@ func loginIntro(cx *core.Scope) core.Node {
 		TestID: "login-intro",
 		Style:  core.Style{Width: core.Pt(300), Gap: 12},
 		Children: []core.Node{
+			core.Show{When: func() bool { return cx.Env().Window().Height >= 700 }, Then: func(*core.Scope) core.Node { return illustration("login-art", assignmentDesk) }},
 			monoCap(cx, "禅道助手", colors.Accent),
 			core.Text{
 				Content: "登录禅道，只看指派给你的事", Role: core.RoleHeader,
 				Style: ui.TypeHeading.Merge(core.Style{FontSize: 26, LineHeight: 32, LetterSpacingEm: -0.02}),
 			},
 			core.Text{
-				Content: "登录后会每轮拉取分配给你的未完成任务和 Bug，工作台只展示与您相关的内容。",
+				Content: "在一个工作台查看指派给你的任务、需求和 Bug。",
 				Style:   ui.TypeBody, StyleFunc: ui.Colored(colors.Muted),
 			},
 			// 参考页登录说明区的要点列表：图标 + 一句话能力说明。

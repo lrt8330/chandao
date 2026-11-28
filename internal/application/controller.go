@@ -15,6 +15,7 @@ var (
 	ErrIncrementalBudgetExceeded = errors.New("incremental sync exceeded page budget")
 	ErrStateLoad                 = errors.New("load application state")
 	ErrInvalidSettings           = errors.New("invalid settings")
+	ErrItemChanged               = errors.New("item no longer exists or its status changed")
 )
 
 // RefreshResult is the snapshot and changes produced by a successful refresh.
@@ -49,6 +50,7 @@ type Controller struct {
 	loggedIn        bool
 	reconciles      int
 	onSnapshot      func(Snapshot)
+	onChanges       func(context.Context, []domain.Change)
 	cancel          context.CancelFunc
 	done            chan struct{}
 	settingsChanged chan struct{}
@@ -196,6 +198,14 @@ func (c *Controller) SetOnSnapshot(fn func(Snapshot)) {
 	c.onSnapshot = fn
 }
 
+// SetOnChanges registers a callback for nonempty change batches after a successful
+// save, independently of popup preferences. Pass nil to unregister it.
+func (c *Controller) SetOnChanges(fn func(context.Context, []domain.Change)) {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	c.onChanges = fn
+}
+
 // CurrentSnapshot returns a copy of the current snapshot so the interface
 // can render persisted items before the first refresh completes.
 func (c *Controller) CurrentSnapshot() Snapshot {
@@ -315,12 +325,18 @@ func (c *Controller) Refresh(ctx context.Context) (RefreshResult, error) {
 		return RefreshResult{}, fmt.Errorf("save snapshot: %w", err)
 	}
 	c.snapshot = snapshot
+	onSnapshot, onChanges := c.onSnapshot, c.onChanges
 	c.refreshMu.Unlock()
-	if c.onSnapshot != nil {
-		c.onSnapshot(snapshot)
+	if onSnapshot != nil {
+		onSnapshot(snapshot)
 	}
-	if snapshot.NotificationsEnabled && len(changes) > 0 {
-		c.notifier.Notify(ctx, changes)
+	if len(changes) > 0 {
+		if onChanges != nil {
+			onChanges(ctx, changes)
+		}
+		if snapshot.NotificationsEnabled && c.notifier != nil {
+			c.notifier.Notify(ctx, changes)
+		}
 	}
 	return RefreshResult{Snapshot: snapshot, Changes: changes}, nil
 }
@@ -352,6 +368,9 @@ func (c *Controller) RunItemAction(ctx context.Context, item domain.Item, action
 	defer c.refreshMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if current, ok := c.snapshot.Items[item.Key()]; !ok || current.Status != item.Status {
+		return fmt.Errorf("%s: %w", item.Key(), ErrItemChanged)
 	}
 	if !c.loggedIn {
 		if err := c.gateway.Login(ctx); err != nil {

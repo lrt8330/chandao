@@ -2,6 +2,10 @@ package ui
 
 import (
 	"testing"
+	"time"
+
+	"github.com/nsgo-dev/nsgo/core"
+	"github.com/nsgo-dev/nsgo/nsgotest"
 
 	"chandao/zentaotray/internal/domain"
 )
@@ -74,5 +78,74 @@ func TestItemActionCancelDoesNotInvoke(t *testing.T) {
 	app.WaitForGone("id:item-action-confirm", 1<<10)
 	if called {
 		t.Fatal("cancel must not invoke the action callback")
+	}
+}
+
+// 确认框打开后状态被刷新改变：关闭确认框且不提交过期操作。
+func TestConfirmRejectsStatusChangedWhileOpen(t *testing.T) {
+	items := []domain.Item{
+		{ID: "108", Type: domain.ItemTask, Title: "并发压测-任务", Project: "示例项目", Status: "doing", URL: "https://zentao.example.invalid/biz/task-view-108.html"},
+	}
+	calls := 0
+	var state *core.Signal[WorkbenchData]
+	props := WorkbenchProps{
+		DataFunc: func() WorkbenchData { return state.Get() },
+		OnRunItemAction: func(domain.Item, string, func(string)) {
+			calls++
+		},
+	}
+	app := nsgotest.Start(t, func(cx *core.Scope) core.Node {
+		state = core.NewSignalFunc(cx, WorkbenchData{Connected: true, Items: items}, nil)
+		return Workbench(cx, props)
+	}, workbenchTestOptions()...)
+
+	app.Press("id:item-list >> text:并发压测-任务")
+	app.Settle()
+	app.Press("id:item-action-finish")
+	app.Settle()
+	app.Find("id:item-action-confirm")
+
+	paused := append([]domain.Item(nil), items...)
+	paused[0].Status = "pause"
+	app.Post(func() { state.Set(WorkbenchData{Connected: true, Items: paused}) })
+	app.Settle()
+	app.WaitForGone("id:item-action-confirm", time.Second)
+	if calls != 0 {
+		t.Fatalf("stale action submitted %d times", calls)
+	}
+}
+
+// 请求执行中再次点击同一操作的确认：不得重复提交。
+func TestItemActionSubmitsOnceWhileRunning(t *testing.T) {
+	items := []domain.Item{
+		{ID: "108", Type: domain.ItemTask, Title: "慢请求任务", Project: "示例项目", Status: "doing", URL: "https://zentao.example.invalid/biz/task-view-108.html"},
+	}
+	calls := 0
+	var done func(string)
+	props := WorkbenchProps{Data: WorkbenchData{Connected: true, Items: items}}
+	props.OnRunItemAction = func(domain.Item, string, func(string)) { calls++; done = func(string) {} }
+	app := startWorkbench(t, props)
+
+	app.Press("id:item-list >> text:慢请求任务")
+	app.Settle()
+	app.Press("id:item-action-finish")
+	app.Settle()
+	app.Press("id:confirm-item-action")
+	app.Settle()
+	if calls != 1 {
+		t.Fatalf("action calls = %d, want 1", calls)
+	}
+	// 执行中按钮应禁用，重复点击不会再次弹确认框或提交。
+	if !app.Find("id:item-action-finish").Props.Disabled {
+		t.Fatal("action button is not disabled while the request is running")
+	}
+	if app.Exists("id:item-action-confirm") {
+		t.Fatal("confirm dialog reopened while a request was running")
+	}
+	if calls != 1 {
+		t.Fatalf("action calls = %d, want 1", calls)
+	}
+	if done == nil {
+		t.Fatal("done callback missing")
 	}
 }

@@ -18,6 +18,8 @@ GET index.php?m=my&f={task|bug|story}&browseType=assignedTo&param=0&orderBy={id_
 - 增量同步按 `lastEditedDate_desc` 翻页，遇整页旧数据即停（含 2 分钟
   安全余量，覆盖时间戳精度与时钟偏差）
 - 需求页没有项目列，项目名退回 `c-plan`，再退 `c-product`
+- 任务/Bug/需求任一类抓取或解析失败，整轮刷新失败并保留上一基线：
+  不会把「抓取失败」当成「该类已清零」
 
 ### 策略与预算（application/controller.go、zentao/service.go）
 
@@ -56,7 +58,9 @@ GET index.php?m=my&f={task|bug|story}&browseType=assignedTo&param=0&orderBy={id_
 2. 解析表单：隐藏域（token 等）、输入框/下拉选中值/文本域的**页面预填值**
    全部回填（工时、解决方案等保持禅道默认）
 3. `POST` 表单 action 地址，`overrides` 可覆盖同名字段（当前 UI 未暴露）
-4. 响应是登录页即视为会话失效
+4. 响应是登录页即视为会话失效；JSON `result=success` 才算成功，
+   `result=fail` 或带错误提示的表单页算明确拒绝；其余响应标记为
+   「结果未知」，提示先刷新核实，绝不自动重试写操作
 
 动作与对象走白名单（task/bug/story × start/finish/pause/cancel/close/
 activate/resolve/confirm/assign/transfer/recordEstimate），防注入。
@@ -75,7 +79,9 @@ Controller 在会话过期时自动重登录并重试一次。
 | Bug | closed | 激活 |
 | 需求 | — | 暂不开放（只读） |
 
-UI 上每一步都要过 AlertDialog 确认；成功后自动刷新，错误回显在操作行。
+UI 上每一步都要过 AlertDialog 确认；确认时会用最新数据复核事项状态，
+状态已变化则关闭确认框、不提交过期操作。请求执行期间同一事项的按钮
+禁用，避免重复提交；成功后自动刷新，错误回显在对应事项的操作行。
 
 ### ⚠ 验证状态
 

@@ -42,6 +42,40 @@ func TestWorkbenchOpensNotificationHistory(t *testing.T) {
 	app.WaitForGone("id:notify-history", time.Second)
 }
 
+// 已读状态改变但条数不变时，列表必须重绘；否则行上会残留未读点。
+func TestHistoryEntriesCompareContent(t *testing.T) {
+	at := time.Now()
+	read := []notifyhistory.Entry{{ID: 1, Time: at, Kind: "new", Title: "a", Read: true}}
+	unread := []notifyhistory.Entry{{ID: 1, Time: at, Kind: "new", Title: "a"}}
+	if sameHistoryEntries(read, unread) {
+		t.Fatal("entries differing only in read state compared equal")
+	}
+	if !sameHistoryEntries(read, read) {
+		t.Fatal("identical entries compared different")
+	}
+}
+
+// 打开后才到达的通知，再次打开时应显示出来。
+func TestNotificationHistoryReloadsOnOpen(t *testing.T) {
+	store, err := notifyhistory.Open(filepath.Join(t.TempDir(), "notify.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	props := WorkbenchProps{Data: WorkbenchData{Connected: true}, NotifyHistory: store}
+	app := startWorkbench(t, props)
+
+	at := time.Now()
+	if err := store.Append(context.Background(), at, []notifyhistory.Entry{
+		{Kind: "new", ItemType: "bug", ItemID: "11", Title: "打开后才到", Project: "Web 平台", NewStatus: "active"},
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	app.Press("id:open-notify-history")
+	app.Settle()
+	app.Find(`text:"打开后才到"`)
+}
+
 func TestWorkbenchHidesNotifyHistoryWithoutStore(t *testing.T) {
 	app := startWorkbench(t, WorkbenchProps{Data: WorkbenchData{Connected: true}})
 	if app.Exists("id:open-notify-history") {

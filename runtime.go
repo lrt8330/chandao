@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -12,19 +11,13 @@ import (
 
 	"chandao/zentaotray/internal/application"
 	"chandao/zentaotray/internal/domain"
-	"chandao/zentaotray/internal/infrastructure/notifyhistory"
 	"chandao/zentaotray/internal/infrastructure/security"
-	"chandao/zentaotray/internal/infrastructure/storage"
 	"chandao/zentaotray/internal/infrastructure/zentao"
 	"chandao/zentaotray/internal/ui"
 	"github.com/nsgo-dev/nsgo/core"
 )
 
-const (
-	defaultZentaoBaseURL = "http://192.168.2.225/biz/"
-	accountSecretKey     = "account"
-	passwordSecretKey    = "password"
-)
+const defaultZentaoBaseURL = "http://192.168.2.225/biz/"
 
 var zentaoBaseURL = configuredZentaoBaseURL()
 
@@ -38,15 +31,18 @@ func configuredZentaoBaseURL() string {
 // workbenchRuntime coordinates blocking session work with the UI goroutine.
 // Controller callbacks and all signal writes are marshaled through cx.Post.
 type workbenchRuntime struct {
-	cx            *core.Scope
-	data          *core.Signal[ui.WorkbenchData]
-	selectedKey   *core.Signal[string]
-	showWindow    func()
-	popups        *ui.MessagePopupManager
-	report        *ui.ReportWindow
-	credentials   security.SecretsCredentialStore
-	statePath     string
-	notifyHistory *notifyhistory.Store
+	cx          *core.Scope
+	data        *core.Signal[ui.WorkbenchData]
+	selectedKey *core.Signal[string]
+	showWindow  func()
+	// viewSession selects which account's history and report window the
+	// workbench mounts. It is written only from the UI goroutine.
+	viewSession *core.Signal[*accountSession]
+	popups      *ui.MessagePopupManager
+	report      *ui.ReportWindow
+	credentials application.CredentialStore
+	dataDir     string
+	baseURL     string
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -55,47 +51,59 @@ type workbenchRuntime struct {
 	// separately protects the pointer used by quit and callback generations.
 	opMu         sync.Mutex
 	controllerMu sync.Mutex
-	controller   *application.Controller
-	account      string
+	session      *accountSession
 	generation   uint64
 }
 
-func newWorkbenchRuntime(cx *core.Scope, data *core.Signal[ui.WorkbenchData], selectedKey *core.Signal[string], showWindow func(), history *notifyhistory.Store) *workbenchRuntime {
+func newWorkbenchRuntime(cx *core.Scope, data *core.Signal[ui.WorkbenchData], selectedKey *core.Signal[string], showWindow func()) *workbenchRuntime {
 	ctx, cancel := context.WithCancel(cx.Context())
 	return &workbenchRuntime{
-		cx:            cx,
-		data:          data,
-		selectedKey:   selectedKey,
-		showWindow:    showWindow,
-		popups:        ui.NewMessagePopupManager(cx, func(key string) { selectedKey.Set(key); showWindow() }, showWindow),
-		report:        ui.NewReportWindow(cx, history),
-		credentials:   security.SecretsCredentialStore{Secrets: cx.Secrets()},
-		statePath:     filepath.Join(cx.DataDir(), "state.json"),
-		notifyHistory: history,
-		ctx:           ctx,
-		cancel:        cancel,
+		cx:          cx,
+		data:        data,
+		selectedKey: selectedKey,
+		showWindow:  showWindow,
+		viewSession: core.NewSignal[*accountSession](cx, nil),
+		credentials: security.SecretsCredentialStore{Secrets: cx.Secrets()},
+		dataDir:     cx.DataDir(),
+		baseURL:     zentaoBaseURL,
+		ctx:         ctx,
+		cancel:      cancel,
 	}
 }
 
 // openReport 打开独立报表窗体；重复打开时只显示并聚焦已有窗体。
-func (r *workbenchRuntime) openReport() { r.report.Open() }
+func (r *workbenchRuntime) openReport() {
+	if r.report != nil && !r.data.Get().NeedsLogin {
+		r.report.Open()
+	}
+}
 
 // runItemAction 在后台对一条事项执行生命周期操作（开始/完成/解决/关闭
 // 等），成功后立即刷新；done 在 UI 线程收到人类可读的错误（成功为空串）。
 func (r *workbenchRuntime) runItemAction(item domain.Item, action string, done func(errorMessage string)) {
+	if r.data.Get().NeedsLogin {
+		done("请先登录禅道账号。")
+		return
+	}
+	controller, generation, _, ok := r.currentController()
+	if !ok {
+		done("请先登录禅道账号。")
+		return
+	}
 	go func() {
 		r.opMu.Lock()
-		err := func() error {
-			controller, _, _, ok := r.currentController()
-			if !ok {
-				return errors.New("请先登录禅道账号。")
-			}
-			ctx, cancel := context.WithTimeout(r.ctx, 30*time.Second)
-			defer cancel()
-			return controller.RunItemAction(ctx, item, action)
-		}()
+		if !r.isCurrent(generation) {
+			r.opMu.Unlock()
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.ctx, 30*time.Second)
+		err := controller.RunItemAction(ctx, item, action)
+		cancel()
 		r.opMu.Unlock()
 		r.cx.Post(func() {
+			if !r.isCurrent(generation) {
+				return
+			}
 			if err != nil {
 				done(userMessage(err))
 				return
@@ -115,16 +123,22 @@ func (r *workbenchRuntime) stop() {
 	r.cancel()
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
+	r.stopController()
+}
 
-	r.controllerMu.Lock()
-	controller := r.controller
-	r.controller = nil
-	r.account = ""
-	r.generation++
-	r.controllerMu.Unlock()
-	if controller != nil {
-		controller.Stop()
+// clearSessionView drops windows, timers, and the selected row that belonged
+// to the previous account. Call on the UI goroutine only.
+func (r *workbenchRuntime) clearSessionView() {
+	if r.report != nil {
+		r.report.Close()
+		r.report = nil
 	}
+	if r.popups != nil {
+		r.popups.Dispose()
+		r.popups = nil
+	}
+	r.selectedKey.Set("")
+	r.viewSession.Set(nil)
 }
 
 func (r *workbenchRuntime) login(account, password string) {
@@ -133,51 +147,37 @@ func (r *workbenchRuntime) login(account, password string) {
 		r.postError("请输入禅道账号和密码。", true)
 		return
 	}
-	r.setLoading(true)
+	if r.data.Get().Loading {
+		return
+	}
+	// 切换账号：旧账号的列表、历史视图和待确认操作立即失效，避免新账号
+	// 在旧数据上继续操作。
+	r.clearSessionView()
+	r.data.Set(ui.WorkbenchData{NeedsLogin: true, Loading: true, PollSeconds: 60, PopupSeconds: 8, NotificationsEnabled: true})
 	go func() {
 		r.opMu.Lock()
 		defer r.opMu.Unlock()
 
 		r.stopController()
-		controller, err := r.newController(account, password)
+		session, err := r.newSession(account, password)
 		if err != nil {
 			r.postError(userMessage(err), true)
 			return
 		}
-
 		// Verify both login and assigned-item access before keeping credentials.
-		result, err := controller.Refresh(r.ctx)
+		result, err := session.controller.Refresh(r.ctx)
 		if err != nil {
+			session.close()
 			// Any failed verification leaves the user on the login panel.
 			r.postError(userMessage(err), true)
 			return
 		}
-		if err := r.credentials.Set(accountSecretKey, account); err != nil {
+		if err := saveLogin(r.credentials, r.baseURL, loginSecret{Account: account, Password: password}); err != nil {
+			session.close()
 			r.postError(secureSaveMessage, true)
 			return
 		}
-		if err := r.credentials.Set(passwordSecretKey, password); err != nil {
-			// Never fall back to plaintext. Remove the incomplete account entry
-			// when possible so the next launch asks for a complete login.
-			_ = r.credentials.Delete(accountSecretKey)
-			r.postError(secureSaveMessage, true)
-			return
-		}
-
-		r.installController(controller, account)
-		r.cx.Post(func() {
-			r.data.Set(applyRefresh(r.data.Get(), account, result))
-			r.data.Update(func(data ui.WorkbenchData) ui.WorkbenchData {
-				data.Loading = true // Controller.Start performs an immediate poll.
-				return data
-			})
-			// Ask only after an explicit, successful login. A denial is
-			// asynchronous and does not affect the established session.
-			if result.Snapshot.NotificationsEnabled {
-				r.cx.RequestNotificationPermission(nil)
-			}
-		})
-		r.startPollingController(controller, account)
+		r.activate(session, result, false)
 	}()
 }
 
@@ -185,7 +185,7 @@ func (r *workbenchRuntime) loadSavedCredentials() {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
 
-	account, found, err := r.credentials.Get(accountSecretKey)
+	secret, found, err := readLogin(r.credentials, r.baseURL)
 	if err != nil {
 		r.postError(secureReadMessage, true)
 		return
@@ -193,86 +193,78 @@ func (r *workbenchRuntime) loadSavedCredentials() {
 	if !found {
 		return
 	}
-	password, found, err := r.credentials.Get(passwordSecretKey)
-	if err != nil {
-		r.postError(secureReadMessage, true)
-		return
-	}
-	if !found || strings.TrimSpace(account) == "" || strings.TrimSpace(password) == "" {
+	account := strings.TrimSpace(secret.Account)
+	if account == "" || strings.TrimSpace(secret.Password) == "" {
 		r.postError("已保存的登录凭据不完整，请重新登录。", true)
 		return
 	}
 
-	controller, err := r.newController(account, password)
+	session, err := r.newSession(account, secret.Password)
 	if err != nil {
 		r.postError(userMessage(err), true)
 		return
 	}
-	r.installController(controller, account)
-	// 启动即渲染持久化快照：账号巨大时首轮全量刷新要数分钟，
-	// 界面不应停留在空列表等待。
-	snapshot := controller.CurrentSnapshot()
-	r.cx.Post(func() {
-		r.data.Update(func(data ui.WorkbenchData) ui.WorkbenchData {
-			data.Account = account
-			data.NeedsLogin = false
-			data.Connected = false
-			data.Loading = true
-			data.ErrorMessage = ""
-			data.Items = snapshotItems(snapshot.Items)
-			data.Changes = nil
-			data.LastSuccess = snapshot.LastSuccess
-			data.PollSeconds = snapshot.PollSeconds
-			data.NotificationsEnabled = snapshot.NotificationsEnabled
-			data.PopupSeconds = snapshot.PopupSeconds
-			return data
-		})
-	})
-	// Saved credentials are reused directly and are never written back here.
-	r.startController(controller, account)
+	// 启动即渲染该账号持久化快照，首轮全量刷新完成前界面不空等。
+	r.activate(session, application.RefreshResult{Snapshot: session.controller.CurrentSnapshot()}, true)
 }
 
-func (r *workbenchRuntime) newController(account, password string) (*application.Controller, error) {
-	client, err := zentao.New(zentaoBaseURL, account, password)
+func (r *workbenchRuntime) newSession(account, password string) (*accountSession, error) {
+	client, err := zentao.New(r.baseURL, account, password)
 	if err != nil {
 		return nil, err
 	}
-	return application.NewController(
-		r.ctx,
-		zentao.NewService(client),
-		storage.FileSnapshotStore{Path: r.statePath},
-		messagePopupNotifier{manager: r.popups, history: r.notifyHistory, duration: func() int { return r.data.Get().PopupSeconds }},
-	)
+	var session *accountSession
+	var notify messagePopupNotifier = func(changes []domain.Change) {
+		r.cx.Post(func() {
+			// 迟到的变化只属于产生它的会话；账号切换或退出登录后丢弃。
+			if r.viewSession.Get() != session || r.popups == nil || r.data.Get().NeedsLogin {
+				return
+			}
+			r.popups.Show(changes, r.data.Get().PopupSeconds)
+		})
+	}
+	session, err = openAccountSession(r.ctx, r.dataDir, r.baseURL, account, zentao.NewService(client), notify)
+	return session, err
 }
 
-// recordSnapshot 把一次成功刷新的总量快照写入本地报表库。
-func (r *workbenchRuntime) recordSnapshot(snapshot application.Snapshot) {
-	if r.notifyHistory == nil {
-		return
-	}
-	point := notifyhistory.SnapshotPoint{}
-	for _, item := range snapshot.Items {
-		switch {
-		case item.Type == domain.ItemTask:
-			point.TasksTotal++
-			switch strings.ToLower(item.Status) {
-			case "doing":
-				point.TasksDoing++
-			case "wait":
-				point.TasksWait++
-			case "pause":
-				point.TasksPause++
-			}
-		case item.Type == domain.ItemBug && strings.EqualFold(item.Status, "active"):
-			point.BugsActive++
+// activate is called with opMu held. It publishes the account's history and
+// report window generation, then lets the controller poll. Results from a
+// superseded generation are dropped by isCurrent.
+func (r *workbenchRuntime) activate(s *accountSession, result application.RefreshResult, restoring bool) {
+	r.controllerMu.Lock()
+	r.generation++
+	generation := r.generation
+	r.session = s
+	r.controllerMu.Unlock()
+	r.cx.Post(func() {
+		if !r.isCurrent(generation) {
+			return
 		}
-	}
-	point.Total = len(snapshot.Items)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := r.notifyHistory.AppendSnapshot(ctx, snapshot.LastSuccess, point); err != nil {
-		_ = err
-	}
+		r.cx.Batch(func() {
+			r.clearSessionView()
+			r.popups = ui.NewMessagePopupManager(r.cx, func(key string) {
+				r.selectedKey.Set(key)
+				r.showWindow()
+			}, r.showWindow)
+			if s.history != nil {
+				r.report = ui.NewReportWindow(r.cx, s.history)
+			}
+			next := applyRefresh(ui.WorkbenchData{PollSeconds: 60, PopupSeconds: 8, NotificationsEnabled: true}, s.account, result)
+			if restoring {
+				// 持久化快照先展示，连接状态等首轮刷新回来再点亮。
+				next.Connected = false
+				next.Loading = true
+			}
+			r.data.Set(next)
+			r.viewSession.Set(s)
+		})
+		// Ask only after an explicit, successful login. A denial is
+		// asynchronous and does not affect the established session.
+		if !restoring && result.Snapshot.NotificationsEnabled {
+			r.cx.RequestNotificationPermission(nil)
+		}
+	})
+	r.startControllerWithMode(s.controller, s.account, restoring)
 }
 
 func (r *workbenchRuntime) refresh() {
@@ -298,7 +290,7 @@ func (r *workbenchRuntime) refresh() {
 			if !r.isCurrent(generation) {
 				return
 			}
-			r.data.Set(applyRefresh(r.data.Get(), account, result))
+			r.applyResult(account, result)
 		})
 	}()
 }
@@ -382,47 +374,30 @@ func (r *workbenchRuntime) postControllerError(generation uint64, account string
 	})
 }
 
-func (r *workbenchRuntime) installController(controller *application.Controller, account string) {
-	r.controllerMu.Lock()
-	defer r.controllerMu.Unlock()
-	r.controller = controller
-	r.account = account
-	r.generation++
-}
-
 func (r *workbenchRuntime) stopController() {
 	r.controllerMu.Lock()
-	controller := r.controller
-	r.controller = nil
-	r.account = ""
+	session := r.session
+	r.session = nil
 	r.generation++
 	r.controllerMu.Unlock()
-	if controller != nil {
-		controller.Stop()
+	if session != nil {
+		session.close()
 	}
 }
 
 func (r *workbenchRuntime) currentController() (*application.Controller, uint64, string, bool) {
 	r.controllerMu.Lock()
 	defer r.controllerMu.Unlock()
-	if r.controller == nil {
+	if r.session == nil {
 		return nil, 0, "", false
 	}
-	return r.controller, r.generation, r.account, true
+	return r.session.controller, r.generation, r.session.account, true
 }
 
 func (r *workbenchRuntime) isCurrent(generation uint64) bool {
 	r.controllerMu.Lock()
 	defer r.controllerMu.Unlock()
-	return r.controller != nil && r.generation == generation
-}
-
-func (r *workbenchRuntime) startController(controller *application.Controller, account string) {
-	r.startControllerWithMode(controller, account, true)
-}
-
-func (r *workbenchRuntime) startPollingController(controller *application.Controller, account string) {
-	r.startControllerWithMode(controller, account, false)
+	return r.session != nil && r.generation == generation
 }
 
 func (r *workbenchRuntime) startControllerWithMode(controller *application.Controller, account string, refreshImmediately bool) {
@@ -434,7 +409,7 @@ func (r *workbenchRuntime) startControllerWithMode(controller *application.Contr
 			if !r.isCurrent(generation) {
 				return
 			}
-			r.data.Set(applyRefresh(r.data.Get(), account, result))
+			r.applyResult(account, result)
 		})
 	}
 	onError := func(err error) { r.postControllerError(generation, account, err) }
@@ -445,35 +420,26 @@ func (r *workbenchRuntime) startControllerWithMode(controller *application.Contr
 	controller.StartPolling(r.ctx, onResult, onError)
 }
 
-type messagePopupNotifier struct {
-	manager  *ui.MessagePopupManager
-	history  *notifyhistory.Store
-	duration func() int
+// messagePopupNotifier adapts change batches to the popup manager. History is
+// recorded by the account session separately, so muting popups never loses it.
+type messagePopupNotifier func([]domain.Change)
+
+func (n messagePopupNotifier) Notify(_ context.Context, changes []domain.Change) {
+	if n != nil {
+		n(changes)
+	}
 }
 
-// Notify 先把变化写入本地 SQLite 历史（失败仅降级，不影响通知），再交给
-// 弹窗管理器分流：小批次逐条弹、大批次只弹一张摘要卡。
-func (n messagePopupNotifier) Notify(ctx context.Context, changes []domain.Change) {
-	if n.history != nil {
-		at := time.Now()
-		entries := make([]notifyhistory.Entry, 0, len(changes))
-		for _, change := range changes {
-			entries = append(entries, notifyhistory.Entry{
-				Time:      at,
-				Kind:      string(change.Kind),
-				ItemType:  string(change.Item.Type),
-				ItemID:    change.Item.ID,
-				Title:     change.Item.Title,
-				Project:   change.Item.Project,
-				OldStatus: change.Old,
-				NewStatus: change.New,
-			})
+// applyResult publishes a refresh result unless a newer one already landed.
+// Manual refresh and polling can finish out of order; the older result must
+// not overwrite the newer list, changes, or last-success time.
+func (r *workbenchRuntime) applyResult(account string, result application.RefreshResult) {
+	r.data.Update(func(data ui.WorkbenchData) ui.WorkbenchData {
+		if !data.LastSuccess.IsZero() && result.Snapshot.LastSuccess.Before(data.LastSuccess) {
+			return data
 		}
-		if err := n.history.Append(ctx, at, entries); err != nil {
-			_ = err
-		}
-	}
-	n.manager.Show(changes, n.duration())
+		return applyRefresh(data, account, result)
+	})
 }
 
 func snapshotItems(items map[string]domain.Item) []domain.Item {
@@ -508,18 +474,21 @@ func requiresRelogin(err error) bool {
 }
 
 const (
-	secureReadMessage   = "无法读取安全存储中的登录凭据，请重新登录。"
-	secureSaveMessage   = "无法安全保存登录凭据，请检查系统凭据管理器后重试。"
-	stateLoadMessage    = "本地状态文件读取失败，请检查数据目录后重试。"
-	stateSaveMessage    = "本地状态保存失败，请检查数据目录的写入权限。"
-	loginMessage        = "账号或密码不正确，请检查后重试。"
-	sessionMessage      = "禅道登录已过期，请重新登录。"
-	parseMessage        = "禅道页面数据解析失败，请稍后重试或联系管理员。"
-	networkMessage      = "网络连接异常或禅道暂时不可用，请稍后重试。"
-	settingsMessage     = "设置无效，轮询间隔必须为 30 到 300 秒。"
-	cancelledMessage    = "操作已取消，请重试。"
-	baseURLMessage      = "禅道服务地址配置无效，请联系管理员。"
-	responseSizeMessage = "禅道返回的数据过大，请稍后重试。"
+	secureReadMessage     = "无法读取安全存储中的登录凭据，请重新登录。"
+	secureSaveMessage     = "无法安全保存登录凭据，请检查系统凭据管理器后重试。"
+	stateLoadMessage      = "本地状态文件读取失败，请检查数据目录后重试。"
+	stateSaveMessage      = "本地状态保存失败，请检查数据目录的写入权限。"
+	loginMessage          = "账号或密码不正确，请检查后重试。"
+	sessionMessage        = "禅道登录已过期，请重新登录。"
+	parseMessage          = "禅道页面数据解析失败，请稍后重试或联系管理员。"
+	networkMessage        = "网络连接异常或禅道暂时不可用，请稍后重试。"
+	settingsMessage       = "设置无效，轮询间隔必须为 30 到 300 秒。"
+	cancelledMessage      = "操作已取消，请重试。"
+	baseURLMessage        = "禅道服务地址配置无效，请联系管理员。"
+	responseSizeMessage   = "禅道返回的数据过大，请稍后重试。"
+	actionUnknownMessage  = "未能确认禅道是否已执行操作，请先刷新核实，不要直接重复提交。"
+	actionRejectedMessage = "禅道未接受此操作，请检查事项状态和表单要求。"
+	itemChangedMessage    = "事项状态已变化，请刷新后重新选择操作。"
 )
 
 // userMessage maps internal failures to fixed Chinese text. Raw errors can
@@ -527,6 +496,16 @@ const (
 func userMessage(err error) string {
 	if err == nil {
 		return ""
+	}
+	// 写操作结果未知优先于超时/网络提示：不能让用户以为可以安全重试。
+	if errors.Is(err, zentao.ErrActionOutcomeUnknown) {
+		return actionUnknownMessage
+	}
+	if errors.Is(err, zentao.ErrActionRejected) {
+		return actionRejectedMessage
+	}
+	if errors.Is(err, application.ErrItemChanged) {
+		return itemChangedMessage
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return cancelledMessage
@@ -573,7 +552,9 @@ func isParseFailure(err error) bool {
 		errors.Is(err, zentao.ErrDuplicateItemID) ||
 		errors.Is(err, zentao.ErrInvalidPagination) ||
 		errors.Is(err, zentao.ErrConflictingDuplicate) ||
-		errors.Is(err, zentao.ErrPageLimitExceeded) {
+		errors.Is(err, zentao.ErrPageLimitExceeded) ||
+		errors.Is(err, zentao.ErrActionFormNotFound) ||
+		errors.Is(err, zentao.ErrActionFormTarget) {
 		return true
 	}
 	message := err.Error()

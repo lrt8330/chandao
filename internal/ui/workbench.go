@@ -43,8 +43,11 @@ func Workbench(cx *core.Scope, props WorkbenchProps) core.Node {
 		}
 		selectedKey.Set("")
 	}
+	browse := newLocalBrowse(cx)
 	filteredItems := core.NewMemoFunc(cx, func() []domain.Item {
 		data := props.data()
+		query, project := browse.query.Get(), browse.project.Get()
+		kind, onlyChanged := filter.Get(), changesOnly.Get()
 		changedKeys := make(map[string]struct{}, len(data.Changes))
 		for _, change := range data.Changes {
 			changedKeys[change.Item.Key()] = struct{}{}
@@ -52,10 +55,13 @@ func Workbench(cx *core.Scope, props WorkbenchProps) core.Node {
 		var visible []domain.Item
 		for _, item := range data.Items {
 			_, changed := changedKeys[item.Key()]
-			if changesOnly.Get() && !changed {
+			if onlyChanged && !changed {
 				continue
 			}
-			if filter.Get() == itemFilterAll || string(item.Type) == string(filter.Get()) {
+			if project != "" && projectName(item.Project) != project {
+				continue
+			}
+			if (kind == itemFilterAll || string(item.Type) == string(kind)) && matchesLocalQuery(item, query) {
 				visible = append(visible, item)
 			}
 		}
@@ -66,7 +72,18 @@ func Workbench(cx *core.Scope, props WorkbenchProps) core.Node {
 	}, slices.Equal)
 	kpis := core.NewMemo(cx, func() kpiCounts { return workbenchKPIs(props.data()) })
 
-	actions := newItemActionController(cx)
+	// 确认框与详情必须读取同一份、未经过列表筛选的最新选中事项。
+	selectedItem := core.NewMemo(cx, func() domain.Item {
+		if key := selectedKey.Get(); key != "" {
+			for _, item := range props.data().Items {
+				if item.Key() == key {
+					return item
+				}
+			}
+		}
+		return domain.Item{}
+	}).Get
+	actions := newItemActionController(cx, props, selectedItem)
 	return core.View{
 		TestID: "workbench",
 		Style: core.Style{
@@ -78,19 +95,20 @@ func Workbench(cx *core.Scope, props WorkbenchProps) core.Node {
 			settingsDialog(cx, props, settingsOpen),
 			notificationHistoryDialog(cx, props.NotifyHistory, notifyHistoryOpen),
 			commandDialog(cx, props, settingsOpen, notifyHistoryOpen, changesOnly, paletteOpen),
-			actions.confirmDialog(cx, props),
+			actions.confirmDialog(cx),
+			browse.overview(cx, props.data),
 			core.Show{
 				When: func() bool { return strings.TrimSpace(props.data().ErrorMessage) != "" },
 				Then: func(cx *core.Scope) core.Node {
 					return errorBanner(cx, func() string { return props.data().ErrorMessage })
 				},
 			},
-			anchorCards(cx, kpis.Get, func() []domain.Change { return props.data().Changes }),
+			workbenchSummary(cx, kpis.Get),
 			core.Show{
 				When: func() bool { return props.data().NeedsLogin },
 				Then: func(cx *core.Scope) core.Node { return loginPanel(cx, props) },
 				Else: func(cx *core.Scope) core.Node {
-					return workbenchBody(cx, props, listEntries.Get, selection, onSelectionChange, selectedKey, filter, changesOnly, actions)
+					return workbenchBody(cx, props, listEntries.Get, selection, onSelectionChange, selectedKey, filter, changesOnly, actions, browse)
 				},
 			},
 		},
@@ -137,30 +155,37 @@ func workbenchFilters(cx *core.Scope, filter *core.Signal[itemFilter], changesOn
 	}}
 }
 
-func workbenchBody(cx *core.Scope, props WorkbenchProps, entries func() []listEntry, selection *ui.Selection, onSelectionChange func(*ui.Selection), selectedKey *core.Signal[string], filter *core.Signal[itemFilter], changesOnly *core.Signal[bool], actions *itemActionController) core.Node {
-	selectedItem := func() domain.Item {
-		for _, item := range props.data().Items {
-			if item.Key() == selectedKey.Get() {
-				return item
-			}
-		}
-		return domain.Item{}
+func workbenchBody(cx *core.Scope, props WorkbenchProps, entries func() []listEntry, selection *ui.Selection, onSelectionChange func(*ui.Selection), selectedKey *core.Signal[string], filter *core.Signal[itemFilter], changesOnly *core.Signal[bool], actions *itemActionController, browse *localBrowse) core.Node {
+	selectedItem := actions.selected
+	closeDetail := func() {
+		selection.Clear()
+		selectedKey.Set("")
 	}
+	cx.Effect(func() {
+		current := selectedItem()
+		if current.ID == "" && selectedKey.Get() != "" {
+			closeDetail()
+		}
+	})
 	wide := core.NewMemo(cx, func() bool { return cx.Env().Window().Width >= 900 })
 	emptyMessage := func() string {
 		if len(props.data().Items) == 0 {
-			return "暂无待办任务和 Bug"
+			return "暂无指派给我的事项"
 		}
 		return "没有符合当前筛选条件的记录"
 	}
+	initialLoad := func() bool {
+		data := props.data()
+		return data.Loading && data.LastSuccess.IsZero() && len(data.Items) == 0
+	}
 	return core.Dynamic(func(cx *core.Scope) core.Node {
-		list := workbenchList(cx, entries, selection, onSelectionChange, emptyMessage, func() bool { return props.data().Loading }, filter, changesOnly)
+		list := workbenchList(cx, entries, selection, onSelectionChange, emptyMessage, initialLoad, filter, changesOnly, browse, props.data)
 		if !wide.Get() {
 			return core.View{
 				Style: core.Style{FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0), MinHeight: core.Pt(0)},
 				Children: []core.Node{
 					list,
-					itemDetailDialog(cx, selectedItem, props.OnOpenURL, selection, selectedKey, actions),
+					itemDetailDialog(cx, selectedItem, props.OnOpenURL, closeDetail, actions),
 				},
 			}
 		}
@@ -169,31 +194,17 @@ func workbenchBody(cx *core.Scope, props WorkbenchProps, entries func() []listEn
 			Children: []core.Node{
 				list,
 				core.Show{
-					When: func() bool { return selectedKey.Get() != "" },
-					Then: func(cx *core.Scope) core.Node { return itemDetailPane(cx, selectedItem, props.OnOpenURL, actions) },
-					Else: detailPlaceholder,
+					When: func() bool { return selectedItem().ID != "" },
+					Then: func(cx *core.Scope) core.Node {
+						return itemDetailPane(cx, selectedItem, props.OnOpenURL, actions, closeDetail)
+					},
 				},
 			},
 		}
 	})
 }
 
-func detailPlaceholder(cx *core.Scope) core.Node {
-	colors := ui.ColorsOf(cx)
-	return core.View{
-		TestID: "detail-placeholder",
-		Style:  core.Style{Width: core.Pt(380), FlexShrink: 0, Padding: core.All(24), AlignItems: core.AlignCenter, JustifyContent: core.JustifyCenter, Gap: 10},
-		StyleFunc: func() core.Style {
-			return paperSurface(cx)
-		},
-		Children: []core.Node{
-			core.Icon{SVG: lucide.Inbox(), Label: "", Style: core.Style{FontSize: 26}, StyleFunc: ui.Colored(colors.Faint)},
-			core.Text{Content: "选择一条记录查看详情", Style: ui.TypeBody, StyleFunc: ui.Colored(colors.Muted)},
-		},
-	}
-}
-
-func workbenchList(cx *core.Scope, entries func() []listEntry, selection *ui.Selection, onSelectionChange func(*ui.Selection), emptyMessage func() string, loading func() bool, filter *core.Signal[itemFilter], changesOnly *core.Signal[bool]) core.Node {
+func workbenchList(cx *core.Scope, entries func() []listEntry, selection *ui.Selection, onSelectionChange func(*ui.Selection), emptyMessage func() string, loading func() bool, filter *core.Signal[itemFilter], changesOnly *core.Signal[bool], browse *localBrowse, data func() WorkbenchData) core.Node {
 	colors := ui.ColorsOf(cx)
 	return core.View{
 		TestID: "list-panel",
@@ -211,9 +222,20 @@ func workbenchList(cx *core.Scope, entries func() []listEntry, selection *ui.Sel
 			}},
 			// 筛选和「仅看本轮变化」收进列表卡，靠近内容，参考页分区头的做法。
 			workbenchFilters(cx, filter, changesOnly),
-			core.Show{When: loading, Then: func(cx *core.Scope) core.Node { return loadingState(cx) }},
+			browse.controls(cx),
+			core.Text{ContentFunc: func() string {
+				scope := snapshotScope(data())
+				if project := browse.project.Get(); project != "" {
+					scope += " · 项目：" + project
+				}
+				if q := browse.query.Get(); q != "" {
+					scope += " · 搜索：" + q
+				}
+				return scope
+			}, MaxLines: 2, Style: ui.TypeCaption, StyleFunc: ui.Colored(colors.Muted)},
+
 			ui.List{
-				TestID: "item-list", Label: "禅道任务和 Bug", Selection: selection, OnSelectionChange: onSelectionChange,
+				TestID: "item-list", Label: "禅道待办事项", Selection: selection, OnSelectionChange: onSelectionChange,
 				Count: func() int { return len(entries()) },
 				Key: func(i int) any {
 					if entry := entries()[i]; entry.header {
@@ -228,29 +250,45 @@ func workbenchList(cx *core.Scope, entries func() []listEntry, selection *ui.Sel
 					}
 					return entry.item.Title
 				}, EstimatedSize: 72, Gap: 6,
-				Empty: core.View{TestID: "empty-state", Style: core.Style{Padding: core.All(24), Gap: 10, AlignItems: core.AlignCenter, CornerRadius: 8}, StyleFunc: func() core.Style {
-					return core.Style{Background: colors.Inset(), BorderWidth: 1, BorderColor: colors.Border()}
-				}, Children: []core.Node{
-					core.Icon{SVG: lucide.Inbox(), Label: "", Style: core.Style{FontSize: 24}, StyleFunc: ui.Colored(colors.Faint)},
-					core.Text{ContentFunc: emptyMessage, Style: ui.TypeBody, StyleFunc: ui.Colored(colors.Muted)},
-				}},
+				Empty: core.Dynamic(func(cx *core.Scope) core.Node {
+					if loading() {
+						return loadingState(cx)
+					}
+					return core.View{TestID: "empty-state", Style: core.Style{Padding: core.All(24), Gap: 10, AlignItems: core.AlignCenter, CornerRadius: 8}, StyleFunc: func() core.Style {
+						return core.Style{Background: colors.Inset(), BorderWidth: 1, BorderColor: colors.Border()}
+					}, Children: []core.Node{
+						illustration("empty-list-art", inboxAtRest),
+						core.Text{ContentFunc: emptyMessage, Style: ui.TypeBody, StyleFunc: ui.Colored(colors.Muted)},
+					}}
+				}),
 				Style: core.Style{FlexGrow: 1, FlexShrink: 1, MinHeight: core.Pt(0)},
 				Row: func(rowCx *core.Scope, row core.ListRow) core.Node {
-					entry := entries()[row.Index()]
-					if entry.header {
-						return projectGroupHeader(rowCx, entry)
-					}
-					item := func() domain.Item { return entry.item }
-					return core.View{Style: core.Style{Gap: 6, MinWidth: core.Pt(0)}, Children: []core.Node{
-						core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 10, MinWidth: core.Pt(0)}, Children: []core.Node{
-							typePill(rowCx, item().Type),
-							core.Text{ContentFunc: func() string { return item().Title }, MaxLines: 2, Style: ui.TypeLabel.Merge(core.Style{FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0)})},
-						}},
-						core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 12, Wrap: core.Wrap}, Children: []core.Node{
-							statusBadge(func() string { return item().Status }),
-							core.Text{ContentFunc: func() string { return formatUpdatedAt(item().UpdatedAt) }, MaxLines: 1, Style: ui.TypeCaption.Merge(core.Style{FontFamily: Mono}), StyleFunc: ui.Colored(colors.Muted)},
-						}},
-					}}
+					current := core.NewMemo(rowCx, func() listEntry {
+						rows, i := entries(), row.Index()
+						if i < 0 || i >= len(rows) {
+							return listEntry{}
+						}
+						return rows[i]
+					})
+					return core.Dynamic(func(cx *core.Scope) core.Node {
+						entry := current.Get()
+						if entry.header {
+							return projectGroupHeader(cx, entry)
+						}
+						item := entry.item
+						if item.ID == "" {
+							return core.View{}
+						}
+						return core.View{Style: core.Style{Gap: 4, FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0)}, Children: []core.Node{
+							core.Text{Content: item.Title, MaxLines: 2, Style: ui.TypeLabel},
+							core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 8, Wrap: core.Wrap}, Children: []core.Node{
+								typePill(cx, item.Type),
+								core.Text{Content: "#" + item.ID, Style: ui.TypeCaption.Merge(core.Style{FontFamily: Mono}), StyleFunc: ui.Colored(colors.Muted)},
+								statusBadge(func() string { return item.Status }),
+								core.Text{Content: formatUpdatedAt(item.UpdatedAt), MaxLines: 1, Style: ui.TypeCaption.Merge(core.Style{FontFamily: Mono}), StyleFunc: ui.Colored(colors.Muted)},
+							}},
+						}}
+					})
 				},
 			},
 		},
@@ -270,21 +308,20 @@ const groupKeyPrefix = "proj:"
 // projectEntries 把事项按项目分组：组头按首次出现顺序排，事项保持原
 // 相对顺序；空项目归入「未分组」。
 func projectEntries(items []domain.Item) []listEntry {
-	var out []listEntry
-	position := make(map[string]int, len(items))
+	var order []string
+	groups := make(map[string][]listEntry)
 	for _, item := range items {
-		project := strings.TrimSpace(item.Project)
-		if project == "" {
-			project = "未分组"
+		project := projectName(item.Project)
+		if _, exists := groups[project]; !exists {
+			order = append(order, project)
 		}
-		at, ok := position[project]
-		if !ok {
-			at = len(out)
-			position[project] = at
-			out = append(out, listEntry{header: true, name: project})
-		}
-		out[at].count++
-		out = append(out, listEntry{item: item})
+		groups[project] = append(groups[project], listEntry{item: item})
+	}
+	out := make([]listEntry, 0, len(items)+len(order))
+	for _, project := range order {
+		rows := groups[project]
+		out = append(out, listEntry{header: true, name: project, count: len(rows)})
+		out = append(out, rows...)
 	}
 	return out
 }
@@ -370,22 +407,16 @@ func loadingState(cx *core.Scope) core.Node {
 	}
 }
 
-// typePill 是参考页流水行的类型小胶囊：白底细边、6px 圆角，任务走钴蓝
-// 软色，Bug 维持红色语义。
 func typePill(cx *core.Scope, itemType domain.ItemType) core.Node {
-	fill, line, ink := core.RGB(cobaltSoft), core.RGB(cobaltChipLine), core.RGB(cobaltDark)
-	if itemType == domain.ItemBug {
-		fill, line, ink = core.RGB(bugSoftFill), core.RGB(bugSoftLine), core.RGB(cloudDanger)
-	}
-	if itemType == domain.ItemStory {
-		fill, line, ink = core.RGB(storySoftFill), core.RGB(storySoftLine), core.RGB(cloudSuccess)
-	}
+	tone := itemTone(itemType)
 	return core.View{
-		Style:     core.Style{Padding: core.Symmetric(2, 8), CornerRadius: 6, BorderWidth: 1, FlexShrink: 0},
-		StyleFunc: func() core.Style { return core.Style{Background: fill, BorderColor: line} },
+		Style: core.Style{Padding: core.Symmetric(2, 8), CornerRadius: 6, BorderWidth: 1, FlexShrink: 0},
+		StyleFunc: func() core.Style {
+			return core.Style{Background: core.RGB(tone.fill), BorderColor: core.RGB(tone.line)}
+		},
 		Children: []core.Node{core.Text{
 			Content: itemTypeLabel(itemType), Style: ui.TypeCaption,
-			StyleFunc: func() core.Style { return core.Style{Color: ink} },
+			StyleFunc: func() core.Style { return core.Style{Color: core.RGB(tone.ink)} },
 		}},
 	}
 }
@@ -523,26 +554,6 @@ func workbenchHeader(cx *core.Scope, props WorkbenchProps, settingsOpen, notifyH
 	}
 }
 
-// anchorCards 把四个等权 KPI 收成两张信息锚点卡：待办卡给一个大数字，
-// 动态卡给本轮变化摘要，其余层级交给列表纸面。
-func anchorCards(cx *core.Scope, kpis func() kpiCounts, changes func() []domain.Change) core.Node {
-	return core.View{
-		Style: core.Style{Direction: core.Row, Gap: 14, Wrap: core.Wrap, AlignItems: core.AlignStart},
-		Children: []core.Node{
-			anchorCard(cx, todoAnchorCard(cx, kpis)),
-			anchorCard(cx, changeAnchorCard(cx, kpis, changes)),
-		},
-	}
-}
-
-func anchorCard(cx *core.Scope, content core.Node) core.Node {
-	return core.View{
-		Style:     core.Style{FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(260), Padding: core.Symmetric(16, 18), Gap: 10},
-		StyleFunc: func() core.Style { return paperSurface(cx) },
-		Children:  []core.Node{content},
-	}
-}
-
 // monoCap 是参考页 .cap/.code 的等宽小字代号角色：小号、加粗、字距排开。
 func monoCap(cx *core.Scope, content string, colored func() core.Color) core.Node {
 	return core.Text{
@@ -556,151 +567,27 @@ func monoCap(cx *core.Scope, content string, colored func() core.Color) core.Nod
 	}
 }
 
-func todoAnchorCard(cx *core.Scope, kpis func() kpiCounts) core.Node {
+func workbenchSummary(cx *core.Scope, kpis func() kpiCounts) core.Node {
 	colors := ui.ColorsOf(cx)
-	open := func() int { return kpis().tasks + kpis().bugs + kpis().stories }
-	return core.View{Style: core.Style{Gap: 8}, Children: []core.Node{
-		core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 6}, Children: []core.Node{
-			monoCap(cx, "我的待办", colors.Muted),
-			ui.Tooltip{
-				Text: "当前指派给我、尚未关闭的任务、需求与 Bug 总数",
-				Trigger: core.Icon{SVG: lucide.Info(), Label: "说明",
-					Style: core.Style{FontSize: 13}, StyleFunc: ui.Colored(colors.Faint)},
-			},
-		}},
-		core.Text{
-			ContentFunc: func() string { return strconv.Itoa(open()) }, TestID: "kpi-open-value",
-			Style:     core.Style{FontSize: 42, LineHeight: 44, FontWeight: ui.Regular, FontFamily: Serif, LetterSpacingEm: -0.045},
-			StyleFunc: func() core.Style { return core.Style{Color: core.RGB(cobaltDark)} },
-		},
-		core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 14, Wrap: core.Wrap}, Children: []core.Node{
+	group := func(nodes ...core.Node) core.Node {
+		return core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 10, Wrap: core.Wrap, MinWidth: core.Pt(0), FlexShrink: 1}, Children: nodes}
+	}
+	return core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, JustifyContent: core.JustifySpaceBetween, Wrap: core.Wrap, Gap: 12, Padding: core.Symmetric(10, 16)}, StyleFunc: func() core.Style { return paperSurface(cx) }, Children: []core.Node{
+		group(ui.Tooltip{Text: "当前指派给我、尚未完结的事项", Trigger: monoCap(cx, "我的待办", colors.Muted)},
+			core.Text{TestID: "kpi-open-value", ContentFunc: func() string { k := kpis(); return strconv.Itoa(k.tasks + k.stories + k.bugs) }, Style: ui.TypeHeading, StyleFunc: ui.Colored(colors.Accent)},
 			anchorStat(cx, "未完成任务", func() int { return kpis().tasks }, "kpi-tasks-value"),
 			anchorStat(cx, "需求", func() int { return kpis().stories }, "kpi-stories-value"),
-			anchorStat(cx, "未解决 Bug", func() int { return kpis().bugs }, "kpi-bugs-value"),
-		}},
+			anchorStat(cx, "未解决 Bug", func() int { return kpis().bugs }, "kpi-bugs-value")),
+		group(ui.Tooltip{Text: "相对上次刷新的变化；可用「仅看本轮变化」查看明细", Trigger: monoCap(cx, "本轮动态", colors.Muted)},
+			anchorStat(cx, "新增", func() int { return kpis().added }, "kpi-new-value"),
+			anchorStat(cx, "状态变化", func() int { return kpis().statusChanges }, "kpi-status-value")),
 	}}
-}
-
-func changeAnchorCard(cx *core.Scope, kpis func() kpiCounts, changes func() []domain.Change) core.Node {
-	colors := ui.ColorsOf(cx)
-	list := changes()
-	const previewRows = 3
-	rows := list
-	more := 0
-	if len(rows) > previewRows {
-		rows, more = list[:previewRows], len(list)-previewRows
-	}
-	return core.View{Style: core.Style{Gap: 10, FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(300)}, Children: []core.Node{
-		// 参考页「近期支出」卡的头部：等宽代号 + 标题 + 计数 + 底部 hairline。
-		core.View{Style: core.Style{Gap: 6}, Children: []core.Node{
-			core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignBaseline, Gap: 8}, Children: []core.Node{
-				monoCap(cx, "ACTIVITY", colors.Muted),
-				core.Text{Content: "本轮动态", Style: ui.TypeTitle},
-				ui.Tooltip{
-					Text: "本次刷新相对上次的差异预览，完整记录见通知历史",
-					Trigger: core.Icon{SVG: lucide.Info(), Label: "说明",
-						Style: core.Style{FontSize: 13}, StyleFunc: ui.Colored(colors.Faint)},
-				},
-				core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignBaseline, Gap: 5, FlexGrow: 1, JustifyContent: core.JustifyEnd}, Children: []core.Node{
-					core.Text{ContentFunc: func() string { return strconv.Itoa(kpis().added) }, TestID: "kpi-new-value", Style: ui.TypeTitle},
-					core.Text{Content: "新增", Style: ui.TypeCaption, StyleFunc: ui.Colored(colors.Muted)},
-					core.Text{ContentFunc: func() string { return strconv.Itoa(kpis().statusChanges) }, TestID: "kpi-status-value", Style: ui.TypeTitle},
-					core.Text{Content: "变化", Style: ui.TypeCaption, StyleFunc: ui.Colored(colors.Muted)},
-				}},
-			}},
-			core.View{Style: core.Style{Height: core.Pt(1)}, StyleFunc: func() core.Style {
-				return core.Style{Background: colors.Border()}
-			}},
-		}},
-		// 变化行按参考页流水行的软底小卡排，最多预览三条，完整列表见弹窗提醒。
-		changeRows(cx, rows, more),
-	}}
-}
-
-// changeRows 是本轮变化的预览行：movement 胶囊着色，标题 + 项目 + 编号，
-// 与待办列表的条目一一对应。
-func changeRows(cx *core.Scope, rows []domain.Change, more int) core.Node {
-	colors := ui.ColorsOf(cx)
-	children := make([]core.Node, 0, len(rows)+1)
-	for _, change := range rows {
-		change := change
-		children = append(children, core.View{
-			Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 10, Padding: core.Symmetric(8, 10), MinWidth: core.Pt(0)},
-			StyleFunc: func() core.Style {
-				return core.Style{Background: colors.Inset(), BorderWidth: 1, BorderColor: colors.Border(), CornerRadius: 8, BorderCurve: core.BorderCurveContinuous}
-			},
-			Children: []core.Node{
-				movementPill(cx, change.Kind),
-				core.View{Style: core.Style{Gap: 2, FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0)}, Children: []core.Node{
-					core.Text{ContentFunc: func() string { return changeTitle(change) }, MaxLines: 1, Style: ui.TypeLabel.Merge(core.Style{FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0)})},
-					core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignCenter, Gap: 8}, Children: []core.Node{
-						core.Text{ContentFunc: func() string {
-							if change.Item.Project == "" {
-								return changeSummary(change)
-							}
-							return changeSummary(change) + " · " + change.Item.Project
-						}, MaxLines: 1, Style: ui.TypeCaption.Merge(core.Style{FlexGrow: 1, FlexShrink: 1, MinWidth: core.Pt(0)}), StyleFunc: ui.Colored(colors.Muted)},
-						core.Text{ContentFunc: func() string { return change.Item.Key() }, MaxLines: 1, Style: ui.TypeCaption.Merge(core.Style{FontFamily: Mono}), StyleFunc: ui.Colored(colors.Faint)},
-					}},
-				}},
-			},
-		})
-	}
-	if len(rows) == 0 {
-		children = append(children, core.View{
-			Style: core.Style{Padding: core.Symmetric(10, 12), CornerRadius: 8, AlignItems: core.AlignCenter},
-			StyleFunc: func() core.Style {
-				return core.Style{Background: colors.Inset(), BorderWidth: 1, BorderColor: colors.Border()}
-			},
-			Children: []core.Node{core.Text{Content: "本轮还没有变化，稍后自动刷新再看一眼。", Style: ui.TypeCaption, StyleFunc: ui.Colored(colors.Muted)}},
-		})
-	}
-	if more > 0 {
-		children = append(children, core.Text{
-			ContentFunc: func() string { return fmt.Sprintf("还有 %d 条变化，以桌面弹窗提醒", more) },
-			Style:       ui.TypeCaption, StyleFunc: ui.Colored(colors.Muted),
-		})
-	}
-	return core.View{Style: core.Style{Gap: 8}, Children: children}
-}
-
-// movementPill 给变化方向着色：新增走成功绿，状态变化走钴蓝。
-func movementPill(cx *core.Scope, kind domain.ChangeKind) core.Node {
-	fill, line, ink, label := core.RGB(cloudSuccessSoft), core.RGB(0xA9D9C0), core.RGB(cloudSuccess), "新增"
-	if kind == domain.ChangeStatus {
-		fill, line, ink, label = core.RGB(cobaltSoft), core.RGB(cobaltChipLine), core.RGB(cobaltDark), "状态"
-	}
-	return core.View{
-		Style:     core.Style{Padding: core.Symmetric(2, 8), CornerRadius: 6, BorderWidth: 1, FlexShrink: 0},
-		StyleFunc: func() core.Style { return core.Style{Background: fill, BorderColor: line} },
-		Children: []core.Node{core.Text{
-			Content: label, Style: ui.TypeCaption,
-			StyleFunc: func() core.Style { return core.Style{Color: ink} },
-		}},
-	}
-}
-
-func changeTitle(change domain.Change) string {
-	if title := strings.TrimSpace(change.Item.Title); title != "" {
-		return title
-	}
-	if id := strings.TrimSpace(change.Item.ID); id != "" {
-		return id
-	}
-	return itemTypeLabel(change.Item.Type)
-}
-
-func changeSummary(change domain.Change) string {
-	if change.Kind == domain.ChangeStatus {
-		return fmt.Sprintf("%s → %s", change.Old, change.New)
-	}
-	return "新增" + itemTypeLabel(change.Item.Type)
 }
 
 func anchorStat(cx *core.Scope, label string, value func() int, testID string) core.Node {
 	colors := ui.ColorsOf(cx)
 	return core.View{Style: core.Style{Direction: core.Row, AlignItems: core.AlignEnd, Gap: 5}, Children: []core.Node{
-		core.Text{ContentFunc: func() string { return strconv.Itoa(value()) }, TestID: testID, Style: ui.TypeTitle.Merge(core.Style{FontSize: 19, LineHeight: 24})},
+		core.Text{ContentFunc: func() string { return strconv.Itoa(value()) }, TestID: testID, Style: ui.TypeTitle.Merge(core.Style{FontSize: 15, LineHeight: 20})},
 		core.Text{Content: label, Style: ui.TypeCaption, StyleFunc: ui.Colored(colors.Muted)},
 	}}
 }
@@ -764,8 +651,4 @@ func itemTypeLabel(itemType domain.ItemType) string {
 		return "需求"
 	}
 	return "任务"
-}
-
-func itemDetailTitle(item domain.Item) string {
-	return fmt.Sprintf("%s详情", itemTypeLabel(item.Type))
 }

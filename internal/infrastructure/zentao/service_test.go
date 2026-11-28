@@ -11,8 +11,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"chandao/zentaotray/internal/application"
+	"chandao/zentaotray/internal/domain"
 )
 
 func TestServiceAggregatesAllTaskAndBugPages(t *testing.T) {
@@ -304,6 +306,92 @@ func TestServiceMapsSessionExpiryAndDiscardsTasks(t *testing.T) {
 	}
 }
 
+// Exercise the real HTTP gateway through the controller, including save/cursor semantics.
+func TestRefreshPreservesBaselineOnIncompleteStory(t *testing.T) {
+	var incomplete atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		kind := r.URL.Query().Get("f")
+		switch {
+		case isRefreshRandomRequest(r):
+			fmt.Fprint(w, "12")
+		case isLoginRequest(r):
+			fmt.Fprint(w, `{"result":"success"}`)
+		case kind == "story" && incomplete.Load():
+			fmt.Fprint(w, serviceAssignedPage(kind, 2))
+		case kind == "story":
+			fmt.Fprint(w, serviceAssignedPage(kind, 1, serviceTestItem{"1", "需求", "active"}))
+		default:
+			fmt.Fprint(w, serviceAssignedPage(kind, 0))
+		}
+	}))
+	defer server.Close()
+	client, err := New(server.URL+"/biz/", "tester", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &loadTestStore{snapshot: application.DefaultSnapshot()}
+	controller, err := application.NewController(context.Background(), NewService(client), store, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	baseline := store.current()
+	if len(baseline.Items) != 1 {
+		t.Fatalf("baseline missing story: %v", baseline.Items)
+	}
+	incomplete.Store(true)
+	if _, err := controller.Refresh(context.Background()); !errors.Is(err, ErrIncompletePage) {
+		t.Fatalf("incremental error = %v", err)
+	}
+	if store.saves != 1 || !reflect.DeepEqual(baseline, controller.CurrentSnapshot()) || !reflect.DeepEqual(baseline, store.current()) {
+		t.Fatal("incomplete refresh changed baseline or cursor")
+	}
+	items, err := NewService(client).FetchAssignedItems(context.Background())
+	if items != nil || !errors.Is(err, ErrIncompletePage) {
+		t.Fatalf("incomplete full snapshot = %v, %v", items, err)
+	}
+}
+
+func TestRefreshFallsBackWhenStoryIncrementExceedsBudget(t *testing.T) {
+	var deltaPages, fullPages atomic.Int32
+	page := serviceAssignedPage("story", (incrementalPageBudget+1)*serviceRecPerPage, serviceTestItems(1, serviceRecPerPage, "active")...)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		kind := r.URL.Query().Get("f")
+		switch {
+		case isRefreshRandomRequest(r):
+			fmt.Fprint(w, "12")
+		case isLoginRequest(r):
+			fmt.Fprint(w, `{"result":"success"}`)
+		case r.URL.Query().Get("orderBy") == "id_desc":
+			fullPages.Add(1)
+			fmt.Fprint(w, serviceAssignedPage(kind, 0))
+		case kind == "story":
+			deltaPages.Add(1)
+			fmt.Fprint(w, page)
+		default:
+			fmt.Fprint(w, serviceAssignedPage(kind, 0))
+		}
+	}))
+	defer server.Close()
+	client, err := New(server.URL+"/biz/", "tester", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := application.DefaultSnapshot()
+	base.Initialized, base.LastSuccess = true, time.Unix(100, 0)
+	store := &loadTestStore{snapshot: base}
+	controller, err := application.NewController(context.Background(), NewService(client), store, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = controller.Refresh(context.Background())
+	if err != nil || deltaPages.Load() != incrementalPageBudget || fullPages.Load() != 3 || store.saves != 1 || len(store.current().Items) != 0 {
+		t.Fatalf("refresh: %v; delta/full pages %d/%d, saves %d", err, deltaPages.Load(), fullPages.Load(), store.saves)
+	}
+}
+
 func isServiceAssignedRequest(r *http.Request, method string) bool {
 	return r.URL.Path == "/biz/index.php" &&
 		r.URL.Query().Get("m") == "my" &&
@@ -328,8 +416,11 @@ func serviceTestItems(firstID, count int, status string) []serviceTestItem {
 
 func serviceAssignedPage(itemType string, total int, items ...serviceTestItem) string {
 	tableID := "tasktable"
-	if itemType == "bug" {
+	switch itemType {
+	case "bug":
 		tableID = "bugList"
+	case "story":
+		tableID = "storyList"
 	}
 	var body string
 	for _, item := range items {
@@ -337,4 +428,30 @@ func serviceAssignedPage(itemType string, total int, items ...serviceTestItem) s
 			item.ID, itemType, item.ID, item.Title, item.Status)
 	}
 	return fmt.Sprintf(`<input id="recTotal" value="%d"><input id="recPerPage" value="100"><table id="%s"><tbody>%s</tbody></table>`, total, tableID, body)
+}
+
+// TestServiceMapsActionSessionExpiryForController 操作页返回登录页时必须
+// 映射为应用层会话过期，控制器才会重登录并重试。
+func TestServiceMapsActionSessionExpiryForController(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isRefreshRandomRequest(r) {
+			fmt.Fprint(w, "123456")
+			return
+		}
+		if isLoginRequest(r) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"result":"success"}`)
+			return
+		}
+		fmt.Fprint(w, `<html><body><form id="loginForm" action="/biz/user-login.html" method="post"><input name="account"><input name="password"></form></body></html>`)
+	}))
+	defer server.Close()
+	client, err := New(server.URL+"/biz/", "tester", "secret")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	err = NewService(client).RunItemAction(context.Background(), domain.ItemTask, "108", "start")
+	if !errors.Is(err, application.ErrSessionExpired) {
+		t.Fatalf("RunItemAction error = %v, want application session expiry", err)
+	}
 }

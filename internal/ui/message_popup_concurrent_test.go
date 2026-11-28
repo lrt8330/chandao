@@ -103,3 +103,19 @@ func TestMessagePopupManagerSummarizesLargeBatches(t *testing.T) {
 	_ = manager
 	_ = app
 }
+
+// Dispose 之后不再展示已排队或新到的通知。
+func TestMessagePopupDisposeStopsQueuedShows(t *testing.T) {
+	app := nsgotest.Start(t, func(cx *core.Scope) core.Node {
+		manager := NewMessagePopupManager(cx, func(string) {}, func() {})
+		manager.Show([]domain.Change{{Kind: domain.ChangeNew, Item: domain.Item{ID: "1", Type: domain.ItemTask, Title: "排队中"}}}, 30)
+		manager.Dispose()
+		manager.Dispose()
+		manager.Show([]domain.Change{{Kind: domain.ChangeNew, Item: domain.Item{ID: "2", Type: domain.ItemTask, Title: "之后"}}}, 30)
+		return core.View{}
+	}, workbenchTestOptions(nsgotest.Size(800, 600))...)
+	app.Settle()
+	if app.Exists("id:message-popup-task:1") || app.Exists("id:message-popup-task:2") {
+		t.Fatal("popup shown after Dispose")
+	}
+}

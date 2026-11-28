@@ -59,6 +59,14 @@ func TestReportWindowShowsTrendAndEvents(t *testing.T) {
 	if allTab := app.Find("id:report-kind-all"); allTab.Props.Selected {
 		t.Fatal("all tab still selected after switching to new")
 	}
+	// 新增与状态变化各一条：从「新增」直接切到「状态变化」，条数相同也必须
+	// 换成新筛选的内容。
+	app.Press("id:report-kind-status")
+	app.Settle()
+	app.Find("text:报表验证任务")
+	if app.Exists("text:报表验证缺陷") {
+		t.Fatal("report kept the previous filter's rows when the counts were equal")
+	}
 
 	// 切回全部，两条都在。
 	app.Press("id:report-kind-all")

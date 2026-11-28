@@ -41,3 +41,5 @@ Desktop.ini
 
 # zentaoctl 实机抓取的页面（含真实数据，不入库）
 /testdata/live/
+# 本机诊断脚本（含实机抓取路径，不入库）
+tmp-seed/

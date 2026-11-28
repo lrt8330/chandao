@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -95,8 +96,9 @@ func main() {
 			fail("%s 写夹具失败: %v", lc.name, err)
 			continue
 		}
-		items, err := lc.parse(body, baseURL+"index.php?m=my&f=task&browseType=assignedTo")
-		if err != nil {
+		items, err := lc.parse(body, baseURL+"index.php?m=my&f="+string(lc.kind)+"&browseType=assignedTo")
+		paging := errors.Is(err, zentao.ErrPaginationRequired)
+		if err != nil && !paging {
 			fail("%s 解析失败——页面结构与解析器假设不一致，把 %s 发给维护者调整解析器: %v", lc.name, path, err)
 			continue
 		}
@@ -108,7 +110,11 @@ func main() {
 				continue
 			}
 		}
-		ok("%s 解析出 %d 条（%s），夹具 %s", lc.name, len(items), summary, path)
+		note := ""
+		if paging {
+			note = "（首页解析成功；列表还有后续页，本工具只校验首页 ≤100 条）"
+		}
+		ok("%s 解析出 %d 条（%s），夹具 %s%s", lc.name, len(items), summary, path, note)
 	}
 
 	// 操作表单页：默认只抓取并解析出字段，不提交。

@@ -1,6 +1,9 @@
 package ui
 
-import "github.com/nsgo-dev/nsgo/core"
+import (
+	"chandao/zentaotray/internal/domain"
+	"github.com/nsgo-dev/nsgo/core"
+)
 
 // 云白钴蓝主题，对齐 imgSaas /tv 现行 cloud-cobalt 皮肤的颜色角色：
 // 云白画布、白卡描边、钴蓝主操作与软芯片、小字等宽代号、衬线大数字。
@@ -24,15 +27,30 @@ const (
 	cloudSuccessSoft = 0xE8F6EF
 	cloudWarning     = 0xA8662C
 	cloudDanger      = 0xBD5548
-	bugSoftFill      = 0xF7E7E4
-	bugSoftLine      = 0xEFC9C3
-	storySoftFill    = 0xE8F6EF
-	storySoftLine    = 0xBFDFD0
+	bugInk           = 0xA44837
+	bugSoftFill      = 0xFBECE6
+	bugSoftLine      = 0xD9AA99
+	storyInk         = 0x216B60
+	storySoftFill    = 0xE3F4EF
+	storySoftLine    = 0x97CABE
 
 	// Serif 是大数字与金额的衬线族；Mono 是 kicker、代号与时间戳的等宽族。
 	Serif = "Georgia, serif"
 	Mono  = core.FontMonospace
 )
+
+type chipTone struct{ fill, line, ink uint32 }
+
+func itemTone(kind domain.ItemType) chipTone {
+	switch kind {
+	case domain.ItemStory:
+		return chipTone{storySoftFill, storySoftLine, storyInk}
+	case domain.ItemBug:
+		return chipTone{bugSoftFill, bugSoftLine, bugInk}
+	default:
+		return chipTone{cobaltSoft, cobaltChipLine, cobaltDark}
+	}
+}
 
 func workbenchTheme() *core.Theme {
 	theme := core.DefaultTheme().Clone()
@@ -72,6 +90,6 @@ func applyWorkbenchPalette(palette *core.Palette) {
 	palette.SetColor("track", core.RGBA(cloudInk, 0.14))
 	palette.SetColor("knob", core.RGB(cloudSurface))
 	palette.SetColor("code", core.RGB(cloudInk))
-	palette.SetColor("info", core.RGB(cobalt))
-	palette.SetColor("down", core.RGB(cloudDanger))
+	palette.SetColor("info", core.RGB(cobaltDark))
+	palette.SetColor("down", core.RGB(bugInk))
 }

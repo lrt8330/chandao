@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"chandao/zentaotray/internal/domain"
@@ -38,6 +39,7 @@ type MessagePopupManager struct {
 	onPress         func(string)
 	onOpenWorkbench func()
 	active          []*messagePopup
+	disposed        atomic.Bool
 }
 
 func NewMessagePopupManager(cx *core.Scope, onPress func(string), onOpenWorkbench func()) *MessagePopupManager {
@@ -45,19 +47,43 @@ func NewMessagePopupManager(cx *core.Scope, onPress func(string), onOpenWorkbenc
 }
 
 func (m *MessagePopupManager) Show(changes []domain.Change, seconds int) {
-	if m == nil || m.cx == nil || len(changes) == 0 {
+	if m == nil || m.cx == nil || len(changes) == 0 || m.disposed.Load() {
 		return
 	}
 	if len(changes) > summaryPopupThreshold {
-		m.cx.Post(func() { m.showSummary(changes, seconds) })
+		m.cx.Post(func() {
+			if m.disposed.Load() {
+				return
+			}
+			m.showSummary(changes, seconds)
+		})
 		return
 	}
 	m.cx.Post(func() {
+		if m.disposed.Load() {
+			return
+		}
 		duration := time.Duration(seconds) * time.Second
 		for _, change := range changes {
 			m.show(change, duration)
 		}
 	})
+}
+
+// Dispose 丢弃已排队但未展示的通知并关闭现有弹窗（切换账号时调用）。
+func (m *MessagePopupManager) Dispose() {
+	if m == nil {
+		return
+	}
+	m.disposed.Store(true)
+	active := m.active
+	m.active = nil
+	for _, popup := range active {
+		popup.stopTimer()
+		if popup.window != nil {
+			popup.window.Close()
+		}
+	}
 }
 
 // summarizeCounts 统计一批变化的新增与状态变化数量。
@@ -76,6 +102,9 @@ func summarizeCounts(changes []domain.Change) (newCount, statusCount int) {
 // showSummary 为大批次弹一张汇总卡：计数 + 打开工作台的入口，
 // 点击卡片即打开工作台（工作台的「仅看本轮变化」可查看全部明细）。
 func (m *MessagePopupManager) showSummary(changes []domain.Change, seconds int) {
+	if m.disposed.Load() {
+		return
+	}
 	if len(m.active) >= maxMessagePopups {
 		m.close(m.active[0])
 	}
@@ -133,6 +162,9 @@ func (m *MessagePopupManager) showSummary(changes []domain.Change, seconds int) 
 }
 
 func (m *MessagePopupManager) show(change domain.Change, duration time.Duration) {
+	if m.disposed.Load() {
+		return
+	}
 	for _, active := range m.active {
 		if active.id == change.Item.Key() {
 			m.close(active)
@@ -166,6 +198,11 @@ func (m *MessagePopupManager) show(change domain.Change, duration time.Duration)
 
 func (m *MessagePopupManager) close(popup *messagePopup) {
 	if popup == nil || popup.closing {
+		return
+	}
+	if m.disposed.Load() {
+		popup.closing = true
+		popup.stopTimer()
 		return
 	}
 	popup.closing = true
@@ -282,19 +319,23 @@ func messagePopupView(cx *core.Scope, manager *MessagePopupManager, popup *messa
 	}
 }
 
-// popupChip 用语义图标代替文字徽章：任务走琥珀座，Bug 维持红色语义，
-// 夜色下换浅琥珀墨色保持对比。
 func popupChip(cx *core.Scope, itemType domain.ItemType) core.Node {
-	accent, line, ink, svg := core.RGB(cobaltSoft), core.RGB(cobaltChipLine), core.RGB(cobaltDark), lucide.ListTodo()
-	if itemType == domain.ItemBug {
-		accent, line, ink, svg = core.RGB(bugSoftFill), core.RGB(bugSoftLine), core.RGB(cloudDanger), lucide.Bug()
+	tone := itemTone(itemType)
+	icon := lucide.ListTodo
+	switch itemType {
+	case domain.ItemStory:
+		icon = lucide.Bookmark
+	case domain.ItemBug:
+		icon = lucide.Bug
 	}
 	return core.View{
-		Style:     core.Style{Width: core.Pt(28), Height: core.Pt(28), CornerRadius: 7, AlignItems: core.AlignCenter, JustifyContent: core.JustifyCenter, FlexShrink: 0, BorderWidth: 1},
-		StyleFunc: func() core.Style { return core.Style{Background: accent, BorderColor: line} },
+		Style: core.Style{Width: core.Pt(28), Height: core.Pt(28), CornerRadius: 7, AlignItems: core.AlignCenter, JustifyContent: core.JustifyCenter, FlexShrink: 0, BorderWidth: 1},
+		StyleFunc: func() core.Style {
+			return core.Style{Background: core.RGB(tone.fill), BorderColor: core.RGB(tone.line)}
+		},
 		Children: []core.Node{core.Icon{
-			SVG: svg, Label: "",
-			Style: core.Style{FontSize: 16}, StyleFunc: func() core.Style { return core.Style{Color: ink} },
+			SVG: icon(), Label: "",
+			Style: core.Style{FontSize: 16}, StyleFunc: func() core.Style { return core.Style{Color: core.RGB(tone.ink)} },
 		}},
 	}
 }
